@@ -11,17 +11,33 @@ import (
 )
 
 func main() {
-	fromAddress := os.Getenv("HERMES_FROM")
-	smtpHost := os.Getenv("HERMES_HOST")
+	smtpUser := os.Getenv("HERMES_USER")
 	smtpPass := os.Getenv("HERMES_PASS")
+	
+	fromAddress := os.Getenv("HERMES_FROM")
+	
+	smtpHost := os.Getenv("HERMES_HOST")
 	smtpPort := os.Getenv("HERMES_PORT")
 
-	if fromAddress == "" || smtpPass == "" {
-		log.Fatal("Missing sender address or SMTP password.")
+	if smtpUser == "" || smtpPass == "" || fromAddress == "" {
+		log.Fatal("Missing SMTP user, password, or from address.")
+	}
+
+	if fromAddress == "" {
+		fromAddress = smtpUser
 	}
 
 	if smtpHost == "" {
 		smtpHost = "smtp.gmail.com"
+	}
+
+	if smtpPort == "" {
+		smtpPort = "587"
+	}
+
+	port, err := strconv.Atoi(smtpPort)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	toAddress := flag.String("to", "", "Recipient address.")
@@ -38,22 +54,13 @@ func main() {
 		*toAddress = fromAddress
 	}
 
-	if smtpPort == "" {
-		smtpPort = "587"
-	}
-
 	m := gomail.NewMessage()
 	m.SetHeader("From", fromAddress)
 	m.SetHeader("To", *toAddress)
 	m.SetHeader("Subject", *mailSubject)
 	m.SetBody("text/html", *mailBody)
 
-	port, err := strconv.Atoi(smtpPort)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	d := gomail.NewDialer(smtpHost, port, fromAddress, smtpPass)
+	d := gomail.NewDialer(smtpHost, port, smtpUser, smtpPass)
 
 	d.TLSConfig = &tls.Config{
 		InsecureSkipVerify: false,
@@ -63,5 +70,4 @@ func main() {
 	if err := d.DialAndSend(m); err != nil {
 		log.Fatal(err)
 	}
-
 }
