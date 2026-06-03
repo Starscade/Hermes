@@ -16,8 +16,12 @@ func main() {
 	smtpPass := os.Getenv("HERMES_PASS")
 	smtpPort := os.Getenv("HERMES_PORT")
 
-	if fromAddress == "" || smtpHost == "" || smtpPass == "" {
-		log.Fatal("Missing sender address, SMTP host, or password.")
+	if fromAddress == "" || smtpPass == "" {
+		log.Fatal("Missing sender address or SMTP password.")
+	}
+
+	if smtpHost == "" {
+		smtpHost = "smtp.gmail.com"
 	}
 
 	toAddress := flag.String("to", "", "Recipient address.")
