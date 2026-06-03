@@ -8,4 +8,5 @@ all:
 		&& CGO_ENABLED=0 \
 			go build \
 				-ldflags="-s -w" \
-				-v -x .
+				-v -x -o ~/.local/bin/hermes \
+				.
