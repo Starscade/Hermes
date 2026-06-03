@@ -13,9 +13,9 @@ import (
 func main() {
 	smtpUser := os.Getenv("HERMES_USER")
 	smtpPass := os.Getenv("HERMES_PASS")
-	
+
 	fromAddress := os.Getenv("HERMES_FROM")
-	
+
 	smtpHost := os.Getenv("HERMES_HOST")
 	smtpPort := os.Getenv("HERMES_PORT")
 
