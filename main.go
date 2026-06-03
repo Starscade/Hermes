@@ -19,8 +19,8 @@ func main() {
 	smtpHost := os.Getenv("HERMES_HOST")
 	smtpPort := os.Getenv("HERMES_PORT")
 
-	if smtpUser == "" || smtpPass == "" || fromAddress == "" {
-		log.Fatal("Missing SMTP user, password, or from address.")
+	if smtpUser == "" || smtpPass == "" {
+		log.Fatal("Missing SMTP user or password.")
 	}
 
 	if fromAddress == "" {
