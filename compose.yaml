@@ -3,6 +3,12 @@ services:
   app:
     build: .
     container_name: hermes
+    environment:
+      - HERMES_FROM="${HERMES_FROM}"
+      - HERMES_HOST="${HERMES_HOST}"
+      - HERMES_PASS="${HERMES_PASS}"
+      - HERMES_PORT="${HERMES_PORT}"
+      - HERMES_USER="${HERMES_USER}"
     init: true
     restart: unless-stopped
     volumes:
