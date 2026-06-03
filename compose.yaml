@@ -5,3 +5,5 @@ services:
     container_name: hermes
     init: true
     restart: unless-stopped
+    volumes:
+      - ./volumes/cron:/etc/periodic:ro
