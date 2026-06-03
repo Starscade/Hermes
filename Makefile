@@ -10,3 +10,12 @@ all:
 				-ldflags="-s -w" \
 				-v -x -o ~/.local/bin/hermes \
 				.
+
+dock:
+
+	@docker build --no-cache -t hermes .
+
+
+run:
+
+	@docker compose --env-file .env up

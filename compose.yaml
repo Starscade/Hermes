@@ -1,0 +1,7 @@
+services:
+
+  app:
+    build: .
+    container_name: hermes
+    init: true
+    restart: unless-stopped
