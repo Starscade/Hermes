@@ -50,13 +50,14 @@ func main() {
 	}
 
 	d := gomail.NewDialer(smtpHost, port, fromAddress, smtpPass)
-	if err := d.DialAndSend(m); err != nil {
-		log.Fatal(err)
-	}
 
 	d.TLSConfig = &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         smtpHost,
+	}
+
+	if err := d.DialAndSend(m); err != nil {
+		log.Fatal(err)
 	}
 
 }
