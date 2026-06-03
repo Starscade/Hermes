@@ -19,22 +19,22 @@ func main() {
 		log.Fatal("Missing sender address, SMTP host, or password.")
 	}
 
-	if smtpPort == "" {
-		smtpPort = "587"
-	}
-
 	toAddress := flag.String("to", "", "Recipient address.")
 	mailSubject := flag.String("subject", "", "Email subject line.")
 	mailBody := flag.String("body", "", "HTML message body.")
 
 	flag.Parse()
 
+	if *mailBody == "" {
+		log.Fatal("Cannot send a blank email.")
+	}
+
 	if *toAddress == "" {
 		*toAddress = fromAddress
 	}
 
-	if *mailBody == "" {
-		log.Fatal("Cannot send a blank email.")
+	if smtpPort == "" {
+		smtpPort = "587"
 	}
 
 	m := gomail.NewMessage()
