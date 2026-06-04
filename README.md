@@ -10,4 +10,4 @@ A command-line tool for sending emails via SMTP.
 
 ## Usage
 
-Pipe the email body into the command: `echo "Hello World" | HERMES_USER=user@gmail.com HERMES_PASS=password hermes -to=dest@example.com -subject="Test Email"`.
+Pipe in an HTML email body: `echo 'Hello, <b>World</b>!' | HERMES_USER=user@gmail.com HERMES_PASS=password hermes -to=dest@example.com -subject='Test Email'`.
