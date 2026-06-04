@@ -43,6 +43,7 @@ func main() {
 	}
 
 	toAddress := flag.String("to", "", "Recipient addresse(s).")
+	ccAddress := flag.String("cc", "", "Carbon copy addresse(s).")
 	mailSubject := flag.String("subject", "", "Email subject line.")
 
 	flag.Parse()
@@ -65,6 +66,9 @@ func main() {
 	m := gomail.NewMessage()
 	m.SetHeader("From", fromAddress)
 	m.SetHeader("To", recipients...)
+	if *ccAddress != "" {
+		m.SetHeader("Cc", strings.Split(*ccAddress, ",")...)
+	}
 	m.SetHeader("Subject", *mailSubject)
 	m.SetBody("text/html", mailBody)
 
