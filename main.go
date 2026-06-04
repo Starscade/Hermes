@@ -44,6 +44,7 @@ func main() {
 
 	toAddress := flag.String("to", "", "Recipient addresse(s).")
 	ccAddress := flag.String("cc", "", "Carbon copy addresse(s).")
+	bccAddress := flag.String("bcc", "", "Blind carbon copy addresse(s).")
 	mailSubject := flag.String("subject", "", "Email subject line.")
 
 	flag.Parse()
@@ -68,6 +69,9 @@ func main() {
 	m.SetHeader("To", recipients...)
 	if *ccAddress != "" {
 		m.SetHeader("Cc", strings.Split(*ccAddress, ",")...)
+	}
+	if *bccAddress != "" {
+		m.SetHeader("Bcc", strings.Split(*bccAddress, ",")...)
 	}
 	m.SetHeader("Subject", *mailSubject)
 	m.SetBody("text/html", mailBody)
