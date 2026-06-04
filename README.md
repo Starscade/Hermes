@@ -10,6 +10,4 @@ Build and run with docker compose: `make run`.
 
 ## Usage
 
-Pipe the email body into the command:
-
-echo "Hello World" | HERMES_USER=user@gmail.com HERMES_PASS=password hermes -to=dest@example.com -subject="Test Email"
+Pipe the email body into the command: `echo "Hello World" | HERMES_USER=user@gmail.com HERMES_PASS=password hermes -to=dest@example.com -subject="Test Email"`.
