@@ -42,7 +42,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	toAddress := flag.String("to", "", "Recipient address.")
+	toAddress := flag.String("to", "", "Recipient addresse(s).")
 	mailSubject := flag.String("subject", "", "Email subject line.")
 
 	flag.Parse()
@@ -55,13 +55,16 @@ func main() {
 		log.Fatal("Cannot send a blank email.")
 	}
 
-	if *toAddress == "" {
-		*toAddress = fromAddress
+	recipients := []string{}
+	if *toAddress != "" {
+		recipients = strings.Split(*toAddress, ",")
+	} else {
+		recipients = []string{fromAddress}
 	}
 
 	m := gomail.NewMessage()
 	m.SetHeader("From", fromAddress)
-	m.SetHeader("To", *toAddress)
+	m.SetHeader("To", recipients...)
 	m.SetHeader("Subject", *mailSubject)
 	m.SetBody("text/html", mailBody)
 
