@@ -3,9 +3,11 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"io"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/gomail.v2"
 )
@@ -42,11 +44,14 @@ func main() {
 
 	toAddress := flag.String("to", "", "Recipient address.")
 	mailSubject := flag.String("subject", "", "Email subject line.")
-	mailBody := flag.String("body", "", "HTML message body.")
 
 	flag.Parse()
 
-	if *mailBody == "" {
+	mailBody, err := getStdin()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if strings.TrimSpace(mailBody) == "" {
 		log.Fatal("Cannot send a blank email.")
 	}
 
@@ -58,7 +63,7 @@ func main() {
 	m.SetHeader("From", fromAddress)
 	m.SetHeader("To", *toAddress)
 	m.SetHeader("Subject", *mailSubject)
-	m.SetBody("text/html", *mailBody)
+	m.SetBody("text/html", mailBody)
 
 	d := gomail.NewDialer(smtpHost, port, smtpUser, smtpPass)
 
@@ -70,4 +75,24 @@ func main() {
 	if err := d.DialAndSend(m); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func getStdin() (string, error) {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	var input []byte
+
+	if (stat.Mode() & os.ModeCharDevice) != 0 {
+		return "", nil
+	}
+
+	input, err = io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+
+	return string(input), nil
 }
