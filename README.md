@@ -4,9 +4,9 @@ Hermes is a command-line interface tool for sending emails via SMTP.
 
 ## Installation
 
-Build and install to `~/.local/bin`: `make`.
-Build docker image: `make dock`.
-Build and run with docker compose: `make run`.
+- Build and install to `~/.local/bin`: `make`.
+- Build docker image: `make dock`.
+- Build and run with docker compose: `make run`.
 
 ## Usage
 
