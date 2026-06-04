@@ -1,6 +1,6 @@
 # Hermes
 
-Hermes is a command-line interface tool for sending emails via SMTP.
+A command-line tool for sending emails via SMTP.
 
 ## Installation
 
