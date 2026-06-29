@@ -15,7 +15,8 @@ A unified, RESTful API for SMTP and IMAP.
 
 ###### WRITE MAIL
 ```
-curl -u 'foo@bar.com:password' localhost:8413/outbox -d '{
+curl -u 'foo@bar.com:password' localhost:8413/outbox \
+     -d '{
 	"to": [
 		"baz@bar.com"
 	],
