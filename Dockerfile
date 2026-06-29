@@ -11,4 +11,5 @@ RUN go mod tidy \
 
 FROM alpine
 COPY --from=builder /hermes /usr/local/bin/hermes
-ENTRYPOINT ["crond", "-f", "-d", "8"]
+
+CMD ["hermes"]

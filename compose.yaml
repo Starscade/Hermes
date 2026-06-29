@@ -2,14 +2,11 @@ services:
 
   app:
     build: .
-    container_name: hermes
     environment:
-      - HERMES_FROM=${HERMES_FROM}
-      - HERMES_HOST=${HERMES_HOST}
-      - HERMES_PASS=${HERMES_PASS}
-      - HERMES_PORT=${HERMES_PORT}
-      - HERMES_USER=${HERMES_USER}
+      - HERMES_HOST_IMAP=${HERMES_HOST_IMAP}
+      - HERMES_HOST_SMTP=${HERMES_HOST_SMTP}
+      - HERMES_PORT=${HERMES_PORT:-8143}
     init: true
+    ports:
+      - "${HERMES_PORT:-8143}:${HERMES_PORT:-8143}"
     restart: unless-stopped
-    volumes:
-      - ./volumes/cron:/etc/periodic:ro

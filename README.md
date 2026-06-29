@@ -1,6 +1,6 @@
 # Hermes
 
-A command-line tool for sending emails via SMTP.
+A unified, RESTful API for SMTP and IMAP.
 
 ## Installation
 
@@ -10,4 +10,14 @@ A command-line tool for sending emails via SMTP.
 
 ## Usage
 
-Pipe in an HTML email body: `echo 'Hello, <b>World</b>!' | HERMES_USER=user@gmail.com HERMES_PASS=password hermes -to=dest@example.com -subject='Test Email'`.
+###### READ MAIL
+`curl -u 'foo@bar.com:password' localhost:8413/unread`
+
+###### WRITE MAIL
+`curl -u 'foo@bar.com:password' localhost:8413/outbox -d '{
+	"to": [
+		"baz@bar.com"
+	],
+	"subject": "Hello, there!",
+	"body": "Lorem ipsum, et cetera."
+}'`
