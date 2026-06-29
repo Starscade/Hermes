@@ -18,5 +18,5 @@ dock:
 
 run:
 
-	@docker compose --env-file .env build --no-cache app
-	@docker compose --env-file .env run --rm --remove-orphans app
+	@docker compose --env-file .env down --remove-orphans --rmi all
+	@docker compose --env-file .env up --remove-orphans
