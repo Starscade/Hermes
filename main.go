@@ -152,7 +152,8 @@ func main() {
 		case http.MethodGet:
 			emails, err := fetchUnread(user, pass)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				fmt.Printf("ERR: %s\n", err.Error())
+				http.Error(w, "", http.StatusInternalServerError)
 				return
 			}
 			if len(emails) == 0 {
