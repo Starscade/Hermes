@@ -11,11 +11,11 @@ A unified, RESTful API for SMTP and IMAP.
 ## Usage
 
 ###### READ MAIL
-`curl -u 'foo@bar.com:password' localhost:8143/unread`
+`curl -u 'foo@bar.com:password' localhost:8143/mail`
 
 ###### WRITE MAIL
 ```
-curl -u 'foo@bar.com:password' localhost:8143/outbox \
+curl -u 'foo@bar.com:password' localhost:8143/mail \
      -d '{
 	"to": [
 		"baz@bar.com"

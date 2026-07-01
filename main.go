@@ -133,17 +133,22 @@ func fetchUnread(user, pass string) ([]Email, error) {
 }
 
 func main() {
-	http.HandleFunc("/unread", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/mail", func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, "", http.StatusUnauthorized)
 			return
 		}
 
 		emails, err := fetchUnread(user, pass)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+
+		if len(emails) == 0 {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
@@ -151,16 +156,16 @@ func main() {
 		json.NewEncoder(w).Encode(emails)
 	})
 
-	http.HandleFunc("/outbox", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/mail", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "", http.StatusMethodNotAllowed)
 			return
 		}
 
 		user, pass, ok := r.BasicAuth()
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, "", http.StatusUnauthorized)
 			return
 		}
 
@@ -189,11 +194,16 @@ func main() {
 		auth := smtp.PlainAuth("", user, pass, host)
 		err := smtp.SendMail(host+":"+port, auth, user, append(req.To, append(req.Cc, req.Bcc...)...), msg)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "", http.StatusInternalServerError)
 			return
 		}
 
 		w.WriteHeader(http.StatusAccepted)
+	})
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "", http.StatusNotFound)
+		return
 	})
 
 	port := os.Getenv("HERMES_PORT")
