@@ -19,19 +19,21 @@ import (
 )
 
 type Email struct {
-	From     string `json:"from"`
-	Subject  string `json:"subject"`
-	Date     string `json:"date"`
-	Body     string `json:"body"`
-	MimeType string `json:"mime_type"`
+	Body     string   `json:"body"`
+	Cc       []string `json:"cc,omitempty"`
+	Date     string   `json:"date"`
+	From     string   `json:"from"`
+	MimeType string   `json:"mime_type"`
+	Subject  string   `json:"subject"`
+	To       []string `json:"to,omitempty"`
 }
 
 type SendRequest struct {
-	To      []string `json:"to"`
-	Cc      []string `json:"cc,omitempty"`
 	Bcc     []string `json:"bcc,omitempty"`
-	Subject string   `json:"subject"`
 	Body    string   `json:"body"`
+	Cc      []string `json:"cc,omitempty"`
+	Subject string   `json:"subject,omitempty"`
+	To      []string `json:"to"`
 }
 
 func minifyHTML(html string) string {
