@@ -89,7 +89,9 @@ func fetchUnread(user, pass string) ([]Email, error) {
 			continue
 		}
 
-		body, mediaTypeFound := "", ""
+		var body string
+		var mediaTypeFound string
+
 		for {
 			p, err := mr.NextPart()
 			if err == io.EOF {
@@ -98,16 +100,24 @@ func fetchUnread(user, pass string) ([]Email, error) {
 			if err != nil {
 				continue
 			}
-			mediaType, _, err := mime.ParseMediaType(p.Header.Get("Content-Type"))
-			if err != nil {
-				continue
-			}
-			if mediaType == "text/plain" || mediaType == "text/html" {
-				b, _ := io.ReadAll(p.Body)
-				body, mediaTypeFound = string(b), mediaType
-				break
+
+			switch h := p.Header.(type) {
+			case *mail.InlineHeader:
+				mediaType, _, err := mime.ParseMediaType(h.Get("Content-Type"))
+				if err != nil {
+					mediaType = "text/plain"
+				}
+
+				if mediaType == "text/plain" || mediaType == "text/html" {
+					b, _ := io.ReadAll(p.Body)
+					body, mediaTypeFound = string(b), mediaType
+					if mediaType == "text/plain" {
+						break
+					}
+				}
 			}
 		}
+
 		body = strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
 		if mediaTypeFound == "text/html" {
 			body = minifyHTML(body)
