@@ -68,14 +68,12 @@ func fetchUnread(user, pass string) ([]Email, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	if len(ids) == 0 {
 		return []Email{}, nil
 	}
 
 	seqset := new(imap.SeqSet)
 	seqset.AddNum(ids...)
-
 	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{imap.FetchEnvelope, section.FetchItem()}
 
@@ -110,7 +108,6 @@ func fetchUnread(user, pass string) ([]Email, error) {
 				break
 			}
 		}
-
 		body = strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
 		if mediaTypeFound == "text/html" {
 			body = minifyHTML(body)
@@ -141,69 +138,52 @@ func main() {
 			return
 		}
 
-		emails, err := fetchUnread(user, pass)
-		if err != nil {
-			http.Error(w, "", http.StatusInternalServerError)
-			return
-		}
+		switch r.Method {
+		case http.MethodGet:
+			emails, err := fetchUnread(user, pass)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(emails) == 0 {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(emails)
 
-		if len(emails) == 0 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+		case http.MethodPost:
+			var req SendRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			host := os.Getenv("HERMES_HOST_SMTP")
+			port := os.Getenv("HERMES_PORT_SMTP")
+			if host == "" {
+				host = "smtp.gmail.com"
+			}
+			if port == "" {
+				port = "587"
+			}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(emails)
-	})
+			msg := []byte("From: " + user + "\r\n" +
+				"To: " + strings.Join(req.To, ",") + "\r\n" +
+				"Cc: " + strings.Join(req.Cc, ",") + "\r\n" +
+				"Subject: " + req.Subject + "\r\n\r\n" +
+				req.Body)
 
-	http.HandleFunc("/mail", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+			auth := smtp.PlainAuth("", user, pass, host)
+			err := smtp.SendMail(host+":"+port, auth, user, append(req.To, append(req.Cc, req.Bcc...)...), msg)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+
+		default:
 			http.Error(w, "", http.StatusMethodNotAllowed)
-			return
 		}
-
-		user, pass, ok := r.BasicAuth()
-		if !ok {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			http.Error(w, "", http.StatusUnauthorized)
-			return
-		}
-
-		var req SendRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		host := os.Getenv("HERMES_HOST_SMTP")
-		port := os.Getenv("HERMES_PORT_SMTP")
-		if host == "" {
-			host = "smtp.gmail.com"
-		}
-		if port == "" {
-			port = "587"
-		}
-
-		msg := []byte("From: " + user + "\r\n" +
-			"To: " + strings.Join(req.To, ",") + "\r\n" +
-			"Cc: " + strings.Join(req.Cc, ",") + "\r\n" +
-			"Subject: " + req.Subject + "\r\n" +
-			"\r\n" +
-			req.Body)
-
-		auth := smtp.PlainAuth("", user, pass, host)
-		err := smtp.SendMail(host+":"+port, auth, user, append(req.To, append(req.Cc, req.Bcc...)...), msg)
-		if err != nil {
-			http.Error(w, "", http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusAccepted)
-	})
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "", http.StatusNotFound)
-		return
 	})
 
 	port := os.Getenv("HERMES_PORT")
