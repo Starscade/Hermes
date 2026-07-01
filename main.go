@@ -196,6 +196,10 @@ func main() {
 		}
 	})
 
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
 	port := os.Getenv("HERMES_PORT")
 	if port == "" {
 		port = "8143"
