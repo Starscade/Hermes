@@ -9,7 +9,7 @@ RUN go mod tidy \
 			-v -x -o /hermes \
 			.
 
-FROM alpine
+FROM scratch
 COPY --from=builder /hermes /usr/local/bin/hermes
 
 CMD ["hermes"]
