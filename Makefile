@@ -18,5 +18,5 @@ dock:
 
 run:
 
-	@docker compose --env-file .env down --remove-orphans --rmi all
-	@docker compose --env-file .env up --remove-orphans
+	@docker compose down --remove-orphans --rmi all
+	@docker compose up --remove-orphans
