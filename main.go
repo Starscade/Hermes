@@ -207,6 +207,7 @@ func main() {
 	if port == "" {
 		port = "8143"
 	}
-	fmt.Printf("\n  Serving on port: %s ...\n\n", port)
+	currentTime := time.Now().Format(time.RFC3339)
+	fmt.Printf("{\"time\":\"%s\",\"level\":\"INFO\",\"log\":\"Serving on port %s...\"}\n", currentTime, port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
