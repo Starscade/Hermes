@@ -3,10 +3,9 @@ services:
   app:
     build: .
     environment:
-      - HERMES_HOST_IMAP=${HERMES_HOST_IMAP}
-      - HERMES_HOST_SMTP=${HERMES_HOST_SMTP}
-      - HERMES_PORT=${HERMES_PORT:-8143}
+      - IMAP_HOST=${IMAP_HOST}
+      - SMTP_HOST=${SMTP_HOST}
     init: true
     ports:
-      - "${HERMES_PORT:-8143}:${HERMES_PORT:-8143}"
+      - "${HERMES_PORT:-8143}:8143"
     restart: unless-stopped

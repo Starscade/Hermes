@@ -42,8 +42,8 @@ func minifyHTML(html string) string {
 }
 
 func fetchUnread(user, pass string) ([]Email, error) {
-	host := os.Getenv("HERMES_HOST_IMAP")
-	port := os.Getenv("HERMES_PORT_IMAP")
+	host := os.Getenv("IMAP_HOST")
+	port := os.Getenv("IMAP_PORT")
 	if host == "" {
 		host = "imap.gmail.com"
 	}
@@ -171,8 +171,8 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			host := os.Getenv("HERMES_HOST_SMTP")
-			port := os.Getenv("HERMES_PORT_SMTP")
+			host := os.Getenv("SMTP_HOST")
+			port := os.Getenv("SMTP_PORT")
 			if host == "" {
 				host = "smtp.gmail.com"
 			}
