@@ -65,26 +65,22 @@ func fetchUnread(user, pass string) ([]Email, error) {
 	if err := c.Login(user, pass); err != nil {
 		return nil, err
 	}
-	if _, err := c.Select("INBOX", false); err != nil {
-		return nil, err
-	}
-
-	criteria := imap.NewSearchCriteria()
-	criteria.WithoutFlags = []string{imap.SeenFlag}
-	ids, err := c.Search(criteria)
+	mbox, err := c.Select("INBOX", false)
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
+
+	if mbox.Messages == 0 {
 		return []Email{}, nil
 	}
 
 	seqset := new(imap.SeqSet)
-	seqset.AddNum(ids...)
+	seqset.AddRange(1, mbox.Messages)
+
 	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{imap.FetchEnvelope, section.FetchItem()}
 
-	messages := make(chan *imap.Message, len(ids))
+	messages := make(chan *imap.Message, mbox.Messages)
 	done := make(chan error, 1)
 	go func() { done <- c.Fetch(seqset, items, messages) }()
 
