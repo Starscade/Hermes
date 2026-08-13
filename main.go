@@ -36,6 +36,11 @@ type SendRequest struct {
 	To      []string `json:"to"`
 }
 
+func logJSON(level, message string) {
+	currentTime := time.Now().Format(time.RFC3339)
+	fmt.Printf("{\"time\":\"%s\",\"level\":\"%s\",\"log\":\"%s\"}\n", currentTime, level, message)
+}
+
 func minifyHTML(html string) string {
 	re := regexp.MustCompile(`>\s+<`)
 	return re.ReplaceAllString(html, "><")
@@ -154,7 +159,7 @@ func main() {
 		case http.MethodGet:
 			emails, err := fetchUnread(user, pass)
 			if err != nil {
-				fmt.Printf("ERR: %s\n", err.Error())
+				logJSON("ERROR", err.Error())
 				http.Error(w, "", http.StatusInternalServerError)
 				return
 			}
@@ -168,6 +173,7 @@ func main() {
 		case http.MethodPost:
 			var req SendRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				logJSON("ERROR", err.Error())
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -189,6 +195,7 @@ func main() {
 			auth := smtp.PlainAuth("", user, pass, host)
 			err := smtp.SendMail(host+":"+port, auth, user, append(req.To, append(req.Cc, req.Bcc...)...), msg)
 			if err != nil {
+				logJSON("ERROR", err.Error())
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -207,7 +214,6 @@ func main() {
 	if port == "" {
 		port = "8143"
 	}
-	currentTime := time.Now().Format(time.RFC3339)
-	fmt.Printf("{\"time\":\"%s\",\"level\":\"INFO\",\"log\":\"Serving on port %s...\"}\n", currentTime, port)
+	logJSON("INFO", fmt.Sprintf("Serving on port %s...", port))
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
