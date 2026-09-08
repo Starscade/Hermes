@@ -143,6 +143,18 @@ func fetchUnread(user, pass string) ([]Email, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		if os.Args[1] == "--print-env" {
+			fmt.Printf("HERMES_PORT=%s\n", getEnv("HERMES_PORT", "8143"))
+			fmt.Printf("IMAP_HOST=%s\n", getEnv("IMAP_HOST", "imap.gmail.com"))
+			fmt.Printf("IMAP_PORT=%s\n", getEnv("IMAP_PORT", "993"))
+			fmt.Printf("SMTP_HOST=%s\n", getEnv("SMTP_HOST", "smtp.gmail.com"))
+			fmt.Printf("SMTP_PORT=%s\n", getEnv("SMTP_PORT", "587"))
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
+
 	http.HandleFunc("/mail", func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok {
@@ -212,4 +224,11 @@ func main() {
 	}
 	logJSON("INFO", fmt.Sprintf("Serving on port %s...", port))
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
 }
