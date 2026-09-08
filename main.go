@@ -18,6 +18,8 @@ import (
 	"github.com/emersion/go-message/mail"
 )
 
+var version = ""
+
 type Email struct {
 	Body     string   `json:"body"`
 	Cc       []string `json:"cc,omitempty"`
@@ -144,15 +146,20 @@ func fetchUnread(user, pass string) ([]Email, error) {
 
 func main() {
 	if len(os.Args) > 1 {
-		if os.Args[1] == "--print-env" {
+		switch os.Args[1] {
+		case "--print-env":
 			fmt.Printf("HERMES_PORT=%s\n", getEnv("HERMES_PORT", "8143"))
 			fmt.Printf("IMAP_HOST=%s\n", getEnv("IMAP_HOST", "imap.gmail.com"))
 			fmt.Printf("IMAP_PORT=%s\n", getEnv("IMAP_PORT", "993"))
 			fmt.Printf("SMTP_HOST=%s\n", getEnv("SMTP_HOST", "smtp.gmail.com"))
 			fmt.Printf("SMTP_PORT=%s\n", getEnv("SMTP_PORT", "587"))
 			os.Exit(0)
+		case "--version":
+			fmt.Println(version)
+			os.Exit(0)
+		default:
+			os.Exit(1)
 		}
-		os.Exit(1)
 	}
 
 	http.HandleFunc("/mail", func(w http.ResponseWriter, r *http.Request) {
