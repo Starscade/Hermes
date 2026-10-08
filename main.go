@@ -2,57 +2,60 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"mime"
 	"net/smtp"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-message/mail"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-var version = ""
+// --- Types ---
 
-type Email struct {
-	Body     string   `json:"body"`
-	Cc       []string `json:"cc,omitempty"`
-	Date     string   `json:"date"`
-	From     string   `json:"from"`
-	MimeType string   `json:"mime_type"`
-	Subject  string   `json:"subject"`
-	To       []string `json:"to,omitempty"`
+type EmailHeader struct {
+	UID     uint32   `json:"uid"`
+	From    string   `json:"from"`
+	To      []string `json:"to"`
+	Subject string   `json:"subject"`
+	Date    string   `json:"date"`
 }
 
-type MailInputs struct{}
+type EmailFull struct {
+	UID      uint32   `json:"uid"`
+	From     string   `json:"from"`
+	To       []string `json:"to"`
+	Subject  string   `json:"subject"`
+	Date     string   `json:"date"`
+	Body     string   `json:"body"`
+	MimeType string   `json:"mime_type"`
+}
+
+type FetchInputs struct {
+	UnreadOnly bool `json:"unread_only,omitempty"`
+}
+
+type ReadInputs struct {
+	UID uint32 `json:"uid"`
+}
 
 type SendInputs struct {
-	To      []string `json:"to" jsonschema:"List of recipient email addresses"`
-	Cc      []string `json:"cc,omitempty" jsonschema:"List of CC recipients"`
-	Bcc     []string `json:"bcc,omitempty" jsonschema:"List of BCC recipients"`
-	Subject string   `json:"subject" jsonschema:"The email subject"`
-	Body    string   `json:"body" jsonschema:"The email body content"`
+	To      []string `json:"to"`
+	Cc      []string `json:"cc,omitempty"`
+	Bcc     []string `json:"bcc,omitempty"`
+	Subject string   `json:"subject"`
+	Body    string   `json:"body"`
 }
 
-func minifyHTML(html string) string {
-	re := regexp.MustCompile(`>\s+<`)
-	return re.ReplaceAllString(html, "><")
-}
+// --- IMAP Logic ---
 
-func fetchUnread() ([]Email, error) {
+func getIMAPClient() (*client.Client, error) {
 	user := os.Getenv("EMAIL_USER")
 	pass := os.Getenv("EMAIL_PASS")
-	if user == "" || pass == "" {
-		return nil, fmt.Errorf("EMAIL_USER or EMAIL_PASS environment variables not set")
-	}
-
 	host := getEnv("IMAP_HOST", "imap.gmail.com")
 	port := getEnv("IMAP_PORT", "993")
 
@@ -60,119 +63,119 @@ func fetchUnread() ([]Email, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer c.Logout()
 
 	if err := c.Login(user, pass); err != nil {
+		c.Logout()
 		return nil, err
 	}
+
+	return c, nil
+}
+
+func handleFetchEmails(ctx context.Context, input FetchInputs) (interface{}, error) {
+	c, err := getIMAPClient()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Logout()
+
 	mbox, err := c.Select("INBOX", false)
 	if err != nil {
 		return nil, err
 	}
 
-	if mbox.Messages == 0 {
-		return []Email{}, nil
+	var seqSet *imap.SeqSet
+	if input.UnreadOnly {
+		criteria := imap.NewSearchCriteria()
+		criteria.WithoutFlags = []string{imap.SeenFlag}
+		ids, err := c.Search(criteria)
+		if err != nil {
+			return nil, err
+		}
+		if len(ids) == 0 {
+			return []EmailHeader{}, nil
+		}
+		seqSet = newSeqSet(ids)
+	} else {
+		seqSet = newSeqSetRange(1, mbox.Messages)
 	}
 
-	seqset := new(imap.SeqSet)
-	seqset.AddRange(1, mbox.Messages)
+	items := []imap.FetchItem{imap.FetchEnvelope}
+	messages := make(chan *imap.Message, 10)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- c.Fetch(seqSet, items, messages)
+	}()
+
+	var headers []EmailHeader
+	for msg := range messages {
+		headers = append(headers, EmailHeader{
+			UID:     msg.SeqNum,
+			From:    msg.Envelope.From[0].Address(),
+			Subject: msg.Envelope.Subject,
+			Date:    msg.Envelope.Date.String(),
+		})
+		if len(headers) >= 20 {
+			break
+		}
+	}
+
+	if err := <-done; err != nil {
+		return nil, err
+	}
+
+	return headers, nil
+}
+
+func handleReadEmail(ctx context.Context, input ReadInputs) (interface{}, error) {
+	c, err := getIMAPClient()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Logout()
 
 	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{imap.FetchEnvelope, section.FetchItem()}
-
-	messages := make(chan *imap.Message, mbox.Messages)
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchBody}
+	seqSet := newSeqSet([]uint32{input.UID})
+	messages := make(chan *imap.Message, 1)
 	done := make(chan error, 1)
-	go func() { done <- c.Fetch(seqset, items, messages) }()
 
-	var results []Email
-	for msg := range messages {
-		r := msg.GetBody(section)
-		mr, err := mail.CreateReader(r)
-		if err != nil {
-			continue
-		}
+	go func() {
+		done <- c.Fetch(seqSet, items, messages)
+	}()
 
-		var body string
-		var mediaTypeFound string
-
-		for {
-			p, err := mr.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				continue
-			}
-
-			switch h := p.Header.(type) {
-			case *mail.InlineHeader:
-				mediaType, _, err := mime.ParseMediaType(h.Get("Content-Type"))
-				if err != nil {
-					mediaType = "text/plain"
-				}
-
-				if mediaType == "text/plain" || mediaType == "text/html" {
-					b, _ := io.ReadAll(p.Body)
-					body, mediaTypeFound = string(b), mediaType
-					if mediaType == "text/plain" {
-						break
-					}
-				}
-			}
-		}
-
-		body = strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
-		if mediaTypeFound == "text/html" {
-			body = minifyHTML(body)
-		}
-
-		fromAddr := ""
-		if len(msg.Envelope.From) > 0 {
-			fromAddr = msg.Envelope.From[0].Address()
-		}
-
-		results = append(results, Email{
-			From:     fromAddr,
-			Subject:  msg.Envelope.Subject,
-			Date:     msg.Envelope.Date.Format(time.RFC3339),
-			Body:     body,
-			MimeType: mediaTypeFound,
-		})
+	msg := <-messages
+	if err := <-done; err != nil {
+		return nil, err
 	}
-	return results, <-done
+
+	if msg == nil {
+		return nil, fmt.Errorf("email not found")
+	}
+
+	body := ""
+	r := msg.GetBody(section)
+	if r != nil {
+		buf, err := io.ReadAll(r)
+		if err == nil {
+			body = string(buf)
+		}
+	}
+
+	return EmailFull{
+		UID:      msg.SeqNum,
+		From:     msg.Envelope.From[0].Address(),
+		Subject:  msg.Envelope.Subject,
+		Date:     msg.Envelope.Date.String(),
+		Body:     body,
+		MimeType: "text/plain",
+	}, nil
 }
 
-func handleFetchEmails(ctx context.Context, req *mcp.CallToolRequest, input MailInputs) (*mcp.CallToolResult, any, error) {
-	emails, err := fetchUnread()
-	if err != nil {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error fetching emails: %v", err)}},
-			IsError: true,
-		}, nil, nil
-	}
-
-	if len(emails) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "No unread emails found."}},
-		}, nil, nil
-	}
-
-	data, _ := json.MarshalIndent(emails, "", "  ")
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
-	}, nil, nil
-}
-
-func handleSendEmail(ctx context.Context, req *mcp.CallToolRequest, input SendInputs) (*mcp.CallToolResult, any, error) {
+func handleSendEmail(ctx context.Context, input SendInputs) (interface{}, error) {
 	user := os.Getenv("EMAIL_USER")
 	pass := os.Getenv("EMAIL_PASS")
-	if user == "" || pass == "" {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "EMAIL_USER or EMAIL_PASS environment variables not set"}},
-			IsError: true,
-		}, nil, nil
-	}
-
 	host := getEnv("SMTP_HOST", "smtp.gmail.com")
 	port := getEnv("SMTP_PORT", "587")
 
@@ -183,38 +186,32 @@ func handleSendEmail(ctx context.Context, req *mcp.CallToolRequest, input SendIn
 		input.Body)
 
 	auth := smtp.PlainAuth("", user, pass, host)
-	err := smtp.SendMail(host+":"+port, auth, user, append(input.To, append(input.Cc, input.Bcc...)...), msg)
+	recipients := append([]string{}, input.To...)
+	recipients = append(recipients, input.Cc...)
+	recipients = append(recipients, input.Bcc...)
+
+	err := smtp.SendMail(host+":"+port, auth, user, recipients, msg)
 	if err != nil {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error sending email: %v", err)}},
-			IsError: true,
-		}, nil, nil
+		return nil, err
 	}
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: "Email sent successfully."}},
-	}, nil, nil
+	return "Email sent successfully.", nil
 }
 
-func main() {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "hermes-mail",
-		Version: version,
-	}, nil)
+// --- SeqSet Helpers ---
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "fetch_emails",
-		Description: "Fetch unread emails from the INBOX using IMAP",
-	}, handleFetchEmails)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "send_email",
-		Description: "Send an email using SMTP",
-	}, handleSendEmail)
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatal(err)
+func newSeqSet(ids []uint32) *imap.SeqSet {
+	ss := imap.SeqSet{}
+	for _, id := range ids {
+		ss.Add(strconv.FormatUint(uint64(id), 10))
 	}
+	return &ss
+}
+
+func newSeqSetRange(start, end uint32) *imap.SeqSet {
+	ss := imap.SeqSet{}
+	ss.AddRange(start, end)
+	return &ss
 }
 
 func getEnv(key, fallback string) string {
@@ -222,4 +219,57 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// --- MCP Tool Wrappers ---
+
+func FetchEmailsTool(ctx context.Context, req *mcp.CallToolRequest, input FetchInputs) (*mcp.CallToolResult, interface{}, error) {
+	res, err := handleFetchEmails(ctx, input)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, res, nil
+}
+
+func ReadEmailTool(ctx context.Context, req *mcp.CallToolRequest, input ReadInputs) (*mcp.CallToolResult, interface{}, error) {
+	res, err := handleReadEmail(ctx, input)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, res, nil
+}
+
+func SendEmailTool(ctx context.Context, req *mcp.CallToolRequest, input SendInputs) (*mcp.CallToolResult, interface{}, error) {
+	res, err := handleSendEmail(ctx, input)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, res, nil
+}
+
+func main() {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "Email Tool",
+		Version: "1.0.0",
+	}, nil)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "fetch_emails",
+		Description: "Fetch a list of email headers",
+	}, FetchEmailsTool)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "read_email",
+		Description: "Read the full content of an email by UID",
+	}, ReadEmailTool)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "send_email",
+		Description: "Send an email",
+	}, SendEmailTool)
+
+	log.Println("Starting MCP Email Server...")
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
 }
