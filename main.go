@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/smtp"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -44,13 +47,100 @@ type JSONRPCResponse struct {
 	Error   interface{} `json:"error,omitempty"`
 }
 
+// readUntilTag reads from the connection until a line starting with the expected tag is found
+func readUntilTag(reader *bufio.Reader, conn net.Conn, tag string) (string, error) {
+	var response strings.Builder
+	for {
+		// Set a deadline for each read attempt to prevent indefinite hanging
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return response.String(), err
+		}
+		response.WriteString(line)
+		if strings.HasPrefix(line, tag) {
+			break
+		}
+	}
+	return response.String(), nil
+}
+
+// sendRawIMAPCommand implements a basic IMAP client with proper tag tracking and timeouts
+func sendRawIMAPCommand(cmd string) (string, error) {
+	host := os.Getenv("IMAP_HOST")
+	port := os.Getenv("IMAP_PORT")
+	user := os.Getenv("EMAIL_USER")
+	pass := os.Getenv("EMAIL_PASS")
+
+	if host == "" || port == "" {
+		return "", fmt.Errorf("IMAP_HOST or IMAP_PORT not set")
+	}
+
+	// Use a dialer with a timeout to prevent hanging indefinitely
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.Dial("tcp", fmt.Sprintf("%s:%s", host, port))
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	// 1. Read greeting
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("failed to read IMAP greeting: %v", err)
+	}
+
+	// 2. Login
+	fmt.Fprintf(conn, "a1 LOGIN %s %s\r\n", user, pass)
+	resp, err := readUntilTag(reader, conn, "a1")
+	if err != nil || !strings.Contains(resp, "OK") {
+		return "", fmt.Errorf("IMAP login failed: %v", err)
+	}
+
+	// 3. Execute command(s)
+	commands := strings.Split(cmd, "\r\n")
+	var finalResponse string
+
+	for i, c := range commands {
+		if c == "" {
+			continue
+		}
+
+		var currentTag string
+		if strings.Contains(c, " ") {
+			// If command already has a tag (e.g. "a1 SELECT"), use it
+			parts := strings.SplitN(c, " ", 2)
+			currentTag = parts[0]
+			fmt.Fprintf(conn, "%s\r\n", c)
+		} else {
+			// Otherwise, assign a new tag
+			currentTag = fmt.Sprintf("a%d", i+2)
+			fmt.Fprintf(conn, "%s %s\r\n", currentTag, c)
+		}
+
+		resp, err = readUntilTag(reader, conn, currentTag)
+		if err != nil {
+			return "", err
+		}
+		finalResponse += resp
+	}
+
+	// 4. Logout
+	fmt.Fprintf(conn, "a99 LOGOUT\r\n")
+
+	return finalResponse, nil
+}
+
 func mcpHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Security: Validate Origin
 	origin := r.Header.Get("Origin")
 	if origin != "" && origin != "http://localhost" && origin != "https://localhost" {
 		jsonLog("WARN", fmt.Sprintf("Rejected invalid origin: %s", origin))
@@ -71,26 +161,115 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle the 'initialize' method
-	if req.Method == "initialize" {
-		jsonLog("INFO", "Initialize requested")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]interface{}{
-				"protocolVersion": "2024-11-05",
-				"capabilities":    map[string]interface{}{},
-				"serverInfo": map[string]interface{}{
-					"name":    "hermes",
-					"version": "1.0.0",
-				},
-			},
-		})
-		return
+	if req.Method == "server/discover" {
+			jsonLog("INFO", "Discovery requested")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Result: map[string]interface{}{
+							"sessionId": generateSessionID(), // Return a random string
+					},
+			})
+			return
 	}
 
-	// DISCOVERABILITY: Handle tools/list
+	if req.Method == "tools/call" {
+		var params struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		}
+		json.Unmarshal(req.Params, &params)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		switch params.Name {
+		case "list_emails":
+			unreadOnly, _ := params.Arguments["unreadOnly"].(bool)
+			jsonLog("INFO", fmt.Sprintf("Tool 'list_emails' called (unreadOnly: %v)", unreadOnly))
+
+			searchCmd := "a1 SELECT INBOX\r\na2 SEARCH ALL"
+			if unreadOnly {
+				searchCmd = "a1 SELECT INBOX\r\na2 SEARCH UNSEEN"
+			}
+
+			resp, err := sendRawIMAPCommand(searchCmd)
+			if err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
+				return
+			}
+
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{"type": "text", "text": fmt.Sprintf("IMAP Response: %s", resp)},
+					},
+				},
+			})
+			return
+
+		case "read_email":
+			seq, _ := params.Arguments["seq"].(string)
+			jsonLog("INFO", fmt.Sprintf("Tool 'read_email' called for seq: %s", seq))
+
+			cmd := fmt.Sprintf("a1 SELECT INBOX\r\na2 FETCH %s (RFC822)", seq)
+			resp, err := sendRawIMAPCommand(cmd)
+			if err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
+				return
+			}
+
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{"type": "text", "text": resp},
+					},
+				},
+			})
+			return
+
+		case "send_email":
+			to, _ := params.Arguments["to"].(string)
+			subject, _ := params.Arguments["subject"].(string)
+			body, _ := params.Arguments["body"].(string)
+			jsonLog("INFO", fmt.Sprintf("Tool 'send_email' called to %s", to))
+
+			smtpHost := os.Getenv("SMTP_HOST")
+			smtpPort := os.Getenv("SMTP_PORT")
+			user := os.Getenv("EMAIL_USER")
+			pass := os.Getenv("EMAIL_PASS")
+
+			auth := smtp.PlainAuth("", user, pass, smtpHost)
+			addr := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
+
+			msg := []byte("To: " + to + "\r\n" +
+				"Subject: " + subject + "\r\n" +
+				"\r\n" +
+				body + "\r\n")
+
+			err := smtp.SendMail(addr, auth, user, []string{to}, msg)
+			if err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
+				return
+			}
+
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{"type": "text", "text": fmt.Sprintf("Successfully sent email to %s", to)},
+					},
+				},
+			})
+			return
+		}
+	}
+
 	if req.Method == "tools/list" {
 		jsonLog("INFO", "Tools discovery requested")
 		w.Header().Set("Content-Type", "application/json")
@@ -101,7 +280,7 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 				"tools": []map[string]interface{}{
 					{
 						"name":        "list_emails",
-						"description": "Lists emails in the inbox. Can filter by read status.",
+						"description": "Lists email status. Uses raw IMAP SEARCH.",
 						"inputSchema": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
@@ -114,16 +293,16 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 					},
 					{
 						"name":        "read_email",
-						"description": "Reads the body content of a specific email by ID.",
+						"description": "Reads raw email content by sequence number.",
 						"inputSchema": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
-								"emailId": map[string]interface{}{
+								"seq": map[string]interface{}{
 									"type":        "string",
-									"description": "The unique identifier of the email.",
+									"description": "The sequence number of the email.",
 								},
 							},
-							"required": []string{"emailId"},
+							"required": []string{"seq"},
 						},
 					},
 					{
@@ -145,89 +324,6 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle the specific tool call
-	if req.Method == "tools/call" {
-		var params struct {
-			Name      string                 `json:"name"`
-			Arguments map[string]interface{} `json:"arguments"`
-		}
-		json.Unmarshal(req.Params, &params)
-
-		w.Header().Set("Content-Type", "application/json")
-
-		switch params.Name {
-		case "list_emails":
-			unreadOnly, _ := params.Arguments["unreadOnly"].(bool)
-			jsonLog("INFO", fmt.Sprintf("Tool 'list_emails' called (unreadOnly: %v)", unreadOnly))
-
-			emails := []map[string]interface{}{
-				{"id": "1", "from": "alice@example.com", "subject": "Meeting Notes", "read": true},
-				{"id": "2", "from": "bob@example.com", "subject": "Urgent: Project Update", "read": false},
-				{"id": "3", "from": "charlie@example.com", "subject": "Hello!", "read": false},
-			}
-
-			var filtered []map[string]interface{}
-			for _, e := range emails {
-				if !unreadOnly || (unreadOnly && !e["read"].(bool)) {
-					filtered = append(filtered, e)
-				}
-			}
-
-			json.NewEncoder(w).Encode(JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]interface{}{
-					"content": []map[string]interface{}{
-						{
-							"type": "text",
-							"text": fmt.Sprintf("Found %d emails: %v", len(filtered), filtered),
-						},
-					},
-				},
-			})
-			return
-
-		case "read_email":
-			emailId, _ := params.Arguments["emailId"].(string)
-			jsonLog("INFO", fmt.Sprintf("Tool 'read_email' called for ID: %s", emailId))
-
-			content := "This is a dummy email body for email ID " + emailId + ". It contains some very important simulated information."
-			json.NewEncoder(w).Encode(JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]interface{}{
-					"content": []map[string]interface{}{
-						{
-							"type": "text",
-							"text": content,
-						},
-					},
-				},
-			})
-			return
-
-		case "send_email":
-			to, _ := params.Arguments["to"].(string)
-			subject, _ := params.Arguments["subject"].(string)
-			jsonLog("INFO", fmt.Sprintf("Tool 'send_email' called to %s with subject '%s'", to, subject))
-
-			json.NewEncoder(w).Encode(JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]interface{}{
-					"content": []map[string]interface{}{
-						{
-							"type": "text",
-							"text": fmt.Sprintf("Successfully sent email to %s", to),
-						},
-					},
-				},
-			})
-			return
-		}
-	}
-
-	// Default: Method not found
 	jsonLog("WARN", fmt.Sprintf("Method not found: %s", req.Method))
 	w.WriteHeader(http.StatusNotFound)
 	json.NewEncoder(w).Encode(JSONRPCResponse{
@@ -241,7 +337,6 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Use HERMES_PORT environment variable or default to 8080
 	port := os.Getenv("HERMES_PORT")
 	if port == "" {
 		port = "8080"
