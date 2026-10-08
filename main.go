@@ -79,6 +79,7 @@ func handleFetchEmails(ctx context.Context, input FetchInputs) (interface{}, err
 	}
 	defer c.Logout()
 
+	// Select the mailbox
 	mbox, err := c.Select("INBOX", false)
 	if err != nil {
 		return nil, err
@@ -97,10 +98,12 @@ func handleFetchEmails(ctx context.Context, input FetchInputs) (interface{}, err
 		}
 		seqSet = newSeqSet(ids)
 	} else {
+		// Use Range from 1 to total messages
 		seqSet = newSeqSetRange(1, mbox.Messages)
 	}
 
-	items := []imap.FetchItem{imap.FetchEnvelope}
+	// Use FetchUid to get the actual UID instead of the sequence number
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchUid}
 	messages := make(chan *imap.Message, 10)
 	done := make(chan error, 1)
 
@@ -110,8 +113,9 @@ func handleFetchEmails(ctx context.Context, input FetchInputs) (interface{}, err
 
 	var headers []EmailHeader
 	for msg := range messages {
+		// IMPORTANT: Use msg.Uid instead of msg.SeqNum
 		headers = append(headers, EmailHeader{
-			UID:     msg.SeqNum,
+			UID:     msg.Uid,
 			From:    msg.Envelope.From[0].Address(),
 			Subject: msg.Envelope.Subject,
 			Date:    msg.Envelope.Date.String(),
@@ -135,14 +139,23 @@ func handleReadEmail(ctx context.Context, input ReadInputs) (interface{}, error)
 	}
 	defer c.Logout()
 
+	// MUST select mailbox before fetching, otherwise "No mailbox selected"
+	_, err = c.Select("INBOX", false)
+	if err != nil {
+		return nil, err
+	}
+
 	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchBody}
+
+	// Use FetchUid to target the specific UID
 	seqSet := newSeqSet([]uint32{input.UID})
 	messages := make(chan *imap.Message, 1)
 	done := make(chan error, 1)
 
 	go func() {
-		done <- c.Fetch(seqSet, items, messages)
+		// Fetch specifically by UID
+		done <- c.UidFetch(seqSet, items, messages)
 	}()
 
 	msg := <-messages
@@ -151,7 +164,7 @@ func handleReadEmail(ctx context.Context, input ReadInputs) (interface{}, error)
 	}
 
 	if msg == nil {
-		return nil, fmt.Errorf("email not found")
+		return nil, fmt.Errorf("email with UID %d not found", input.UID)
 	}
 
 	body := ""
@@ -164,7 +177,7 @@ func handleReadEmail(ctx context.Context, input ReadInputs) (interface{}, error)
 	}
 
 	return EmailFull{
-		UID:      msg.SeqNum,
+		UID:      msg.Uid,
 		From:     msg.Envelope.From[0].Address(),
 		Subject:  msg.Envelope.Subject,
 		Date:     msg.Envelope.Date.String(),
