@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -49,7 +50,26 @@ type JSONRPCResponse struct {
 	Error   interface{} `json:"error,omitempty"`
 }
 
+// Global IMAP client to prevent "Unexpected EOF" caused by aggressive re-login
+var (
+	imapClient *imapclient.Client
+	imapMutex  sync.Mutex
+)
+
 func getIMAPClient() (*imapclient.Client, error) {
+	imapMutex.Lock()
+	defer imapMutex.Unlock()
+
+	// If client exists, try to verify it's still alive with a NOOP
+	if imapClient != nil {
+		if err := imapClient.Noop().Wait(); err == nil {
+			return imapClient, nil
+		}
+		jsonLog("INFO", "IMAP connection lost, reconnecting...")
+		imapClient.Logout().Wait()
+		imapClient = nil
+	}
+
 	host := os.Getenv("IMAP_HOST")
 	port := os.Getenv("IMAP_PORT")
 	user := os.Getenv("EMAIL_USER")
@@ -61,15 +81,16 @@ func getIMAPClient() (*imapclient.Client, error) {
 
 	c, err := imapclient.DialTLS(fmt.Sprintf("%s:%s", host, port), nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial tls failed: %w", err)
 	}
 
 	if err := c.Login(user, pass).Wait(); err != nil {
 		c.Logout().Wait()
-		return nil, err
+		return nil, fmt.Errorf("login failed: %w", err)
 	}
 
-	return c, nil
+	imapClient = c
+	return imapClient, nil
 }
 
 func mcpHandler(w http.ResponseWriter, r *http.Request) {
@@ -125,42 +146,55 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 			unreadOnly, _ := params.Arguments["unreadOnly"].(bool)
 			jsonLog("INFO", fmt.Sprintf("Tool 'list_emails' called (unreadOnly: %v)", unreadOnly))
 
-			c, err := getIMAPClient()
-			if err != nil {
-				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
-				return
-			}
-			defer c.Logout().Wait()
+			var c *imapclient.Client
+			var err error
 
-			mbox, err := c.Select("INBOX", nil).Wait()
-			if err != nil {
-				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
-				return
+			// Retry once if connection was stale
+			for i := 0; i < 2; i++ {
+				c, err = getIMAPClient()
+				if err != nil {
+					jsonLog("WARN", fmt.Sprintf("IMAP connection attempt %d failed: %v", i+1, err))
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+
+				mbox, selectErr := c.Select("INBOX", nil).Wait()
+				if selectErr == nil {
+					criteria := &imap.SearchCriteria{}
+					if unreadOnly {
+						criteria.NotFlag = []imap.Flag{"\\Seen"}
+					}
+
+					ids, searchErr := c.Search(criteria, nil).Wait()
+					if searchErr != nil {
+						jsonLog("ERROR", fmt.Sprintf("list_emails search error: %v", searchErr))
+						json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": searchErr.Error()}})
+						return
+					}
+
+					respText := fmt.Sprintf("Found %d emails. Sequence IDs: %v (Total messages in box: %d)", len(ids.AllUIDs()), ids.AllUIDs(), mbox.NumMessages)
+					json.NewEncoder(w).Encode(JSONRPCResponse{
+						JSONRPC: "2.0",
+						ID:      req.ID,
+						Result: map[string]interface{}{
+							"content": []map[string]interface{}{
+								{"type": "text", "text": respText},
+							},
+						},
+					})
+					return
+				}
+
+				// If select failed, clear the global client so next attempt reconnects
+				imapMutex.Lock()
+				imapClient = nil
+				imapMutex.Unlock()
+				jsonLog("WARN", fmt.Sprintf("IMAP select attempt %d failed: %v", i+1, selectErr))
+				time.Sleep(500 * time.Millisecond)
 			}
 
-			criteria := &imap.SearchCriteria{}
-			if unreadOnly {
-				// In go-imap v2, we use NotFlag to specify flags that the message must NOT have.
-				// The flag for 'Seen' is typically "\Seen".
-				criteria.NotFlag = []imap.Flag{"\\Seen"}
-			}
-
-			ids, err := c.Search(criteria, nil).Wait()
-			if err != nil {
-				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
-				return
-			}
-
-			respText := fmt.Sprintf("Found %d emails. Sequence IDs: %v (Total messages in box: %d)", len(ids.AllUIDs()), ids.AllUIDs(), mbox.NumMessages)
-			json.NewEncoder(w).Encode(JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]interface{}{
-					"content": []map[string]interface{}{
-						{"type": "text", "text": respText},
-					},
-				},
-			})
+			jsonLog("ERROR", "list_emails failed after retries")
+			json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": "Email server connection failure"}})
 			return
 
 		case "read_email":
@@ -169,18 +203,20 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 
 			seqNum, err := strconv.ParseUint(seqStr, 10, 32)
 			if err != nil {
+				jsonLog("ERROR", fmt.Sprintf("read_email invalid sequence number: %s", seqStr))
 				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": "Invalid sequence number"}})
 				return
 			}
 
 			c, err := getIMAPClient()
 			if err != nil {
+				jsonLog("ERROR", fmt.Sprintf("read_email IMAP client error: %v", err))
 				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
 				return
 			}
-			defer c.Logout().Wait()
 
 			if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+				jsonLog("ERROR", fmt.Sprintf("read_email select error: %v", err))
 				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
 				return
 			}
@@ -241,6 +277,7 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 
 			err := smtp.SendMail(addr, auth, user, []string{to}, msg)
 			if err != nil {
+				jsonLog("ERROR", fmt.Sprintf("send_email SMTP error: %v", err))
 				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
 				return
 			}
