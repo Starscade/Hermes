@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,8 +9,11 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
-	"strings"
+	"strconv"
 	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 )
 
 // LogEntry defines the JSON structure for console logs
@@ -47,92 +49,27 @@ type JSONRPCResponse struct {
 	Error   interface{} `json:"error,omitempty"`
 }
 
-// readUntilTag reads from the connection until a line starting with the expected tag is found
-func readUntilTag(reader *bufio.Reader, conn net.Conn, tag string) (string, error) {
-	var response strings.Builder
-	for {
-		// Set a deadline for each read attempt to prevent indefinite hanging
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return response.String(), err
-		}
-		response.WriteString(line)
-		if strings.HasPrefix(line, tag) {
-			break
-		}
-	}
-	return response.String(), nil
-}
-
-// sendRawIMAPCommand implements a basic IMAP client with proper tag tracking and timeouts
-func sendRawIMAPCommand(cmd string) (string, error) {
+func getIMAPClient() (*imapclient.Client, error) {
 	host := os.Getenv("IMAP_HOST")
 	port := os.Getenv("IMAP_PORT")
 	user := os.Getenv("EMAIL_USER")
 	pass := os.Getenv("EMAIL_PASS")
 
 	if host == "" || port == "" {
-		return "", fmt.Errorf("IMAP_HOST or IMAP_PORT not set")
+		return nil, fmt.Errorf("IMAP_HOST or IMAP_PORT not set")
 	}
 
-	// Use a dialer with a timeout to prevent hanging indefinitely
-	dialer := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.Dial("tcp", fmt.Sprintf("%s:%s", host, port))
+	c, err := imapclient.DialTLS(fmt.Sprintf("%s:%s", host, port), nil)
 	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-
-	// 1. Read greeting
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, err = reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("failed to read IMAP greeting: %v", err)
+		return nil, err
 	}
 
-	// 2. Login
-	fmt.Fprintf(conn, "a1 LOGIN %s %s\r\n", user, pass)
-	resp, err := readUntilTag(reader, conn, "a1")
-	if err != nil || !strings.Contains(resp, "OK") {
-		return "", fmt.Errorf("IMAP login failed: %v", err)
+	if err := c.Login(user, pass).Wait(); err != nil {
+		c.Logout().Wait()
+		return nil, err
 	}
 
-	// 3. Execute command(s)
-	commands := strings.Split(cmd, "\r\n")
-	var finalResponse string
-
-	for i, c := range commands {
-		if c == "" {
-			continue
-		}
-
-		var currentTag string
-		if strings.Contains(c, " ") {
-			// If command already has a tag (e.g. "a1 SELECT"), use it
-			parts := strings.SplitN(c, " ", 2)
-			currentTag = parts[0]
-			fmt.Fprintf(conn, "%s\r\n", c)
-		} else {
-			// Otherwise, assign a new tag
-			currentTag = fmt.Sprintf("a%d", i+2)
-			fmt.Fprintf(conn, "%s %s\r\n", currentTag, c)
-		}
-
-		resp, err = readUntilTag(reader, conn, currentTag)
-		if err != nil {
-			return "", err
-		}
-		finalResponse += resp
-	}
-
-	// 4. Logout
-	fmt.Fprintf(conn, "a99 LOGOUT\r\n")
-
-	return finalResponse, nil
+	return c, nil
 }
 
 func mcpHandler(w http.ResponseWriter, r *http.Request) {
@@ -188,37 +125,88 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 			unreadOnly, _ := params.Arguments["unreadOnly"].(bool)
 			jsonLog("INFO", fmt.Sprintf("Tool 'list_emails' called (unreadOnly: %v)", unreadOnly))
 
-			searchCmd := "a1 SELECT INBOX\r\na2 SEARCH ALL"
-			if unreadOnly {
-				searchCmd = "a1 SELECT INBOX\r\na2 SEARCH UNSEEN"
+			c, err := getIMAPClient()
+			if err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
+				return
 			}
+			defer c.Logout().Wait()
 
-			resp, err := sendRawIMAPCommand(searchCmd)
+			mbox, err := c.Select("INBOX", nil).Wait()
 			if err != nil {
 				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
 				return
 			}
 
+			criteria := &imap.SearchCriteria{}
+			if unreadOnly {
+				// In go-imap v2, we use NotFlag to specify flags that the message must NOT have.
+				// The flag for 'Seen' is typically "\Seen".
+				criteria.NotFlag = []imap.Flag{"\\Seen"}
+			}
+
+			ids, err := c.Search(criteria, nil).Wait()
+			if err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
+				return
+			}
+
+			respText := fmt.Sprintf("Found %d emails. Sequence IDs: %v (Total messages in box: %d)", len(ids.AllUIDs()), ids.AllUIDs(), mbox.NumMessages)
 			json.NewEncoder(w).Encode(JSONRPCResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
 				Result: map[string]interface{}{
 					"content": []map[string]interface{}{
-						{"type": "text", "text": fmt.Sprintf("IMAP Response: %s", resp)},
+						{"type": "text", "text": respText},
 					},
 				},
 			})
 			return
 
 		case "read_email":
-			seq, _ := params.Arguments["seq"].(string)
-			jsonLog("INFO", fmt.Sprintf("Tool 'read_email' called for seq: %s", seq))
+			seqStr, _ := params.Arguments["seq"].(string)
+			jsonLog("INFO", fmt.Sprintf("Tool 'read_email' called for seq: %s", seqStr))
 
-			cmd := fmt.Sprintf("a1 SELECT INBOX\r\na2 FETCH %s (RFC822)", seq)
-			resp, err := sendRawIMAPCommand(cmd)
+			seqNum, err := strconv.ParseUint(seqStr, 10, 32)
+			if err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": "Invalid sequence number"}})
+				return
+			}
+
+			c, err := getIMAPClient()
 			if err != nil {
 				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
 				return
+			}
+			defer c.Logout().Wait()
+
+			if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+				json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}})
+				return
+			}
+
+			seqSet := imap.SeqSetNum(uint32(seqNum))
+			section := &imap.FetchItemBodySection{}
+			options := &imap.FetchOptions{
+				BodySection: []*imap.FetchItemBodySection{section},
+			}
+
+			fetchCmd := c.Fetch(seqSet, options)
+			defer fetchCmd.Close()
+
+			var bodyBuilder string
+			msg := fetchCmd.Next()
+			if msg != nil {
+				for {
+					item := msg.Next()
+					if item == nil {
+						break
+					}
+					if data, ok := item.(imapclient.FetchItemDataBodySection); ok {
+						b, _ := io.ReadAll(data.Literal)
+						bodyBuilder += string(b)
+					}
+				}
 			}
 
 			json.NewEncoder(w).Encode(JSONRPCResponse{
@@ -226,7 +214,7 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 				ID:      req.ID,
 				Result: map[string]interface{}{
 					"content": []map[string]interface{}{
-						{"type": "text", "text": resp},
+						{"type": "text", "text": bodyBuilder},
 					},
 				},
 			})
@@ -280,7 +268,7 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 				"tools": []map[string]interface{}{
 					{
 						"name":        "list_emails",
-						"description": "Lists email status. Uses raw IMAP SEARCH.",
+						"description": "Lists email status using imap library.",
 						"inputSchema": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
