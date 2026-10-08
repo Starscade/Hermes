@@ -162,16 +162,16 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Method == "server/discover" {
-			jsonLog("INFO", "Discovery requested")
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(JSONRPCResponse{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Result: map[string]interface{}{
-							"sessionId": generateSessionID(), // Return a random string
-					},
-			})
-			return
+		jsonLog("INFO", "Discovery requested")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"sessionId": 1,
+			},
+		})
+		return
 	}
 
 	if req.Method == "tools/call" {
