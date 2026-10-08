@@ -82,7 +82,7 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 				"protocolVersion": "2024-11-05",
 				"capabilities":    map[string]interface{}{},
 				"serverInfo": map[string]interface{}{
-					"name":    "gaia-mcp-server",
+					"name":    "hermes",
 					"version": "1.0.0",
 				},
 			},
@@ -100,12 +100,43 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 			Result: map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "foo",
-						"description": "A sample tool that returns lorem ipsum text.",
+						"name":        "list_emails",
+						"description": "Lists emails in the inbox. Can filter by read status.",
 						"inputSchema": map[string]interface{}{
-							"type":       "object",
-							"properties": map[string]interface{}{},
-							"required":   []string{},
+							"type": "object",
+							"properties": map[string]interface{}{
+								"unreadOnly": map[string]interface{}{
+									"type":        "boolean",
+									"description": "If true, only returns unread emails.",
+								},
+							},
+						},
+					},
+					{
+						"name":        "read_email",
+						"description": "Reads the body content of a specific email by ID.",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"emailId": map[string]interface{}{
+									"type":        "string",
+									"description": "The unique identifier of the email.",
+								},
+							},
+							"required": []string{"emailId"},
+						},
+					},
+					{
+						"name":        "send_email",
+						"description": "Sends an email to a recipient.",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"to":      map[string]interface{}{"type": "string", "description": "Recipient email address"},
+								"subject": map[string]interface{}{"type": "string", "description": "Email subject"},
+								"body":    map[string]interface{}{"type": "string", "description": "Email body content"},
+							},
+							"required": []string{"to", "subject", "body"},
 						},
 					},
 				},
@@ -117,13 +148,31 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 	// Handle the specific tool call
 	if req.Method == "tools/call" {
 		var params struct {
-			Name string `json:"name"`
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
 		}
 		json.Unmarshal(req.Params, &params)
 
-		if params.Name == "foo" {
-			jsonLog("INFO", "Tool 'foo' called")
-			w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/json")
+
+		switch params.Name {
+		case "list_emails":
+			unreadOnly, _ := params.Arguments["unreadOnly"].(bool)
+			jsonLog("INFO", fmt.Sprintf("Tool 'list_emails' called (unreadOnly: %v)", unreadOnly))
+
+			emails := []map[string]interface{}{
+				{"id": "1", "from": "alice@example.com", "subject": "Meeting Notes", "read": true},
+				{"id": "2", "from": "bob@example.com", "subject": "Urgent: Project Update", "read": false},
+				{"id": "3", "from": "charlie@example.com", "subject": "Hello!", "read": false},
+			}
+
+			var filtered []map[string]interface{}
+			for _, e := range emails {
+				if !unreadOnly || (unreadOnly && !e["read"].(bool)) {
+					filtered = append(filtered, e)
+				}
+			}
+
 			json.NewEncoder(w).Encode(JSONRPCResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -131,7 +180,45 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 					"content": []map[string]interface{}{
 						{
 							"type": "text",
-							"text": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+							"text": fmt.Sprintf("Found %d emails: %v", len(filtered), filtered),
+						},
+					},
+				},
+			})
+			return
+
+		case "read_email":
+			emailId, _ := params.Arguments["emailId"].(string)
+			jsonLog("INFO", fmt.Sprintf("Tool 'read_email' called for ID: %s", emailId))
+
+			content := "This is a dummy email body for email ID " + emailId + ". It contains some very important simulated information."
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": content,
+						},
+					},
+				},
+			})
+			return
+
+		case "send_email":
+			to, _ := params.Arguments["to"].(string)
+			subject, _ := params.Arguments["subject"].(string)
+			jsonLog("INFO", fmt.Sprintf("Tool 'send_email' called to %s with subject '%s'", to, subject))
+
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": fmt.Sprintf("Successfully sent email to %s", to),
 						},
 					},
 				},
@@ -142,7 +229,6 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Default: Method not found
 	jsonLog("WARN", fmt.Sprintf("Method not found: %s", req.Method))
-	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	json.NewEncoder(w).Encode(JSONRPCResponse{
 		JSONRPC: "2.0",
