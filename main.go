@@ -1,288 +1,181 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/smtp"
+	"net"
+	"net/http"
 	"os"
-	"strconv"
-	"strings"
-
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"time"
 )
 
-// --- Types ---
-
-type EmailHeader struct {
-	UID     uint32   `json:"uid"`
-	From    string   `json:"from"`
-	To      []string `json:"to"`
-	Subject string   `json:"subject"`
-	Date    string   `json:"date"`
+// LogEntry defines the JSON structure for console logs
+type LogEntry struct {
+	Timestamp string `json:"timestamp"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
 }
 
-type EmailFull struct {
-	UID      uint32   `json:"uid"`
-	From     string   `json:"from"`
-	To       []string `json:"to"`
-	Subject  string   `json:"subject"`
-	Date     string   `json:"date"`
-	Body     string   `json:"body"`
-	MimeType string   `json:"mime_type"`
+func jsonLog(level, message string) {
+	entry := LogEntry{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Level:     level,
+		Message:   message,
+	}
+	bytes, _ := json.Marshal(entry)
+	fmt.Fprintln(os.Stdout, string(bytes))
 }
 
-type FetchInputs struct {
-	UnreadOnly bool `json:"unread_only,omitempty"`
+// JSONRPCRequest represents the incoming MCP request body
+type JSONRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      interface{}     `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
 }
 
-type ReadInputs struct {
-	UID uint32 `json:"uid"`
+// JSONRPCResponse represents the outgoing MCP response
+type JSONRPCResponse struct {
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   interface{} `json:"error,omitempty"`
 }
 
-type SendInputs struct {
-	To      []string `json:"to"`
-	Cc      []string `json:"cc,omitempty"`
-	Bcc     []string `json:"bcc,omitempty"`
-	Subject string   `json:"subject"`
-	Body    string   `json:"body"`
-}
+func mcpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-// --- IMAP Logic ---
+	// Security: Validate Origin
+	origin := r.Header.Get("Origin")
+	if origin != "" && origin != "http://localhost" && origin != "https://localhost" {
+		jsonLog("WARN", fmt.Sprintf("Rejected invalid origin: %s", origin))
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 
-func getIMAPClient() (*client.Client, error) {
-	user := os.Getenv("EMAIL_USER")
-	pass := os.Getenv("EMAIL_PASS")
-	host := getEnv("IMAP_HOST", "imap.gmail.com")
-	port := getEnv("IMAP_PORT", "993")
-
-	c, err := client.DialTLS(fmt.Sprintf("%s:%s", host, port), nil)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, err
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
 	}
 
-	if err := c.Login(user, pass); err != nil {
-		c.Logout()
-		return nil, err
+	var req JSONRPCRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		jsonLog("ERROR", "Malformed JSON body")
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
-	return c, nil
-}
-
-func handleFetchEmails(ctx context.Context, input FetchInputs) (interface{}, error) {
-	c, err := getIMAPClient()
-	if err != nil {
-		return nil, err
-	}
-	defer c.Logout()
-
-	// Select the mailbox
-	mbox, err := c.Select("INBOX", false)
-	if err != nil {
-		return nil, err
-	}
-
-	var seqSet *imap.SeqSet
-	if input.UnreadOnly {
-		criteria := imap.NewSearchCriteria()
-		criteria.WithoutFlags = []string{imap.SeenFlag}
-		ids, err := c.Search(criteria)
-		if err != nil {
-			return nil, err
-		}
-		if len(ids) == 0 {
-			return []EmailHeader{}, nil
-		}
-		seqSet = newSeqSet(ids)
-	} else {
-		// Use Range from 1 to total messages
-		seqSet = newSeqSetRange(1, mbox.Messages)
-	}
-
-	// Use FetchUid to get the actual UID instead of the sequence number
-	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchUid}
-	messages := make(chan *imap.Message, 10)
-	done := make(chan error, 1)
-
-	go func() {
-		done <- c.Fetch(seqSet, items, messages)
-	}()
-
-	var headers []EmailHeader
-	for msg := range messages {
-		// IMPORTANT: Use msg.Uid instead of msg.SeqNum
-		headers = append(headers, EmailHeader{
-			UID:     msg.Uid,
-			From:    msg.Envelope.From[0].Address(),
-			Subject: msg.Envelope.Subject,
-			Date:    msg.Envelope.Date.String(),
+	// Handle the 'initialize' method
+	if req.Method == "initialize" {
+		jsonLog("INFO", "Initialize requested")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]interface{}{},
+				"serverInfo": map[string]interface{}{
+					"name":    "gaia-mcp-server",
+					"version": "1.0.0",
+				},
+			},
 		})
-		if len(headers) >= 20 {
-			break
+		return
+	}
+
+	// DISCOVERABILITY: Handle tools/list
+	if req.Method == "tools/list" {
+		jsonLog("INFO", "Tools discovery requested")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"tools": []map[string]interface{}{
+					{
+						"name":        "foo",
+						"description": "A sample tool that returns lorem ipsum text.",
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+							"required":   []string{},
+						},
+					},
+				},
+			},
+		})
+		return
+	}
+
+	// Handle the specific tool call
+	if req.Method == "tools/call" {
+		var params struct {
+			Name string `json:"name"`
+		}
+		json.Unmarshal(req.Params, &params)
+
+		if params.Name == "foo" {
+			jsonLog("INFO", "Tool 'foo' called")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+						},
+					},
+				},
+			})
+			return
 		}
 	}
 
-	if err := <-done; err != nil {
-		return nil, err
-	}
-
-	return headers, nil
-}
-
-func handleReadEmail(ctx context.Context, input ReadInputs) (interface{}, error) {
-	c, err := getIMAPClient()
-	if err != nil {
-		return nil, err
-	}
-	defer c.Logout()
-
-	// MUST select mailbox before fetching, otherwise "No mailbox selected"
-	_, err = c.Select("INBOX", false)
-	if err != nil {
-		return nil, err
-	}
-
-	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchBody}
-
-	// Use FetchUid to target the specific UID
-	seqSet := newSeqSet([]uint32{input.UID})
-	messages := make(chan *imap.Message, 1)
-	done := make(chan error, 1)
-
-	go func() {
-		// Fetch specifically by UID
-		done <- c.UidFetch(seqSet, items, messages)
-	}()
-
-	msg := <-messages
-	if err := <-done; err != nil {
-		return nil, err
-	}
-
-	if msg == nil {
-		return nil, fmt.Errorf("email with UID %d not found", input.UID)
-	}
-
-	body := ""
-	r := msg.GetBody(section)
-	if r != nil {
-		buf, err := io.ReadAll(r)
-		if err == nil {
-			body = string(buf)
-		}
-	}
-
-	return EmailFull{
-		UID:      msg.Uid,
-		From:     msg.Envelope.From[0].Address(),
-		Subject:  msg.Envelope.Subject,
-		Date:     msg.Envelope.Date.String(),
-		Body:     body,
-		MimeType: "text/plain",
-	}, nil
-}
-
-func handleSendEmail(ctx context.Context, input SendInputs) (interface{}, error) {
-	user := os.Getenv("EMAIL_USER")
-	pass := os.Getenv("EMAIL_PASS")
-	host := getEnv("SMTP_HOST", "smtp.gmail.com")
-	port := getEnv("SMTP_PORT", "587")
-
-	msg := []byte("From: " + user + "\r\n" +
-		"To: " + strings.Join(input.To, ",") + "\r\n" +
-		"Cc: " + strings.Join(input.Cc, ",") + "\r\n" +
-		"Subject: " + input.Subject + "\r\n\r\n" +
-		input.Body)
-
-	auth := smtp.PlainAuth("", user, pass, host)
-	recipients := append([]string{}, input.To...)
-	recipients = append(recipients, input.Cc...)
-	recipients = append(recipients, input.Bcc...)
-
-	err := smtp.SendMail(host+":"+port, auth, user, recipients, msg)
-	if err != nil {
-		return nil, err
-	}
-
-	return "Email sent successfully.", nil
-}
-
-// --- SeqSet Helpers ---
-
-func newSeqSet(ids []uint32) *imap.SeqSet {
-	ss := imap.SeqSet{}
-	for _, id := range ids {
-		ss.Add(strconv.FormatUint(uint64(id), 10))
-	}
-	return &ss
-}
-
-func newSeqSetRange(start, end uint32) *imap.SeqSet {
-	ss := imap.SeqSet{}
-	ss.AddRange(start, end)
-	return &ss
-}
-
-func getEnv(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	}
-	return fallback
-}
-
-// --- MCP Tool Wrappers ---
-
-func FetchEmailsTool(ctx context.Context, req *mcp.CallToolRequest, input FetchInputs) (*mcp.CallToolResult, interface{}, error) {
-	res, err := handleFetchEmails(ctx, input)
-	if err != nil {
-		return nil, nil, err
-	}
-	return nil, res, nil
-}
-
-func ReadEmailTool(ctx context.Context, req *mcp.CallToolRequest, input ReadInputs) (*mcp.CallToolResult, interface{}, error) {
-	res, err := handleReadEmail(ctx, input)
-	if err != nil {
-		return nil, nil, err
-	}
-	return nil, res, nil
-}
-
-func SendEmailTool(ctx context.Context, req *mcp.CallToolRequest, input SendInputs) (*mcp.CallToolResult, interface{}, error) {
-	res, err := handleSendEmail(ctx, input)
-	if err != nil {
-		return nil, nil, err
-	}
-	return nil, res, nil
+	// Default: Method not found
+	jsonLog("WARN", fmt.Sprintf("Method not found: %s", req.Method))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	json.NewEncoder(w).Encode(JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Error: map[string]interface{}{
+			"code":    -32601,
+			"message": "Method not found",
+		},
+	})
 }
 
 func main() {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "Email Tool",
-		Version: "1.0.0",
-	}, nil)
+	// Use HERMES_PORT environment variable or default to 8080
+	port := os.Getenv("HERMES_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	address := fmt.Sprintf("127.0.0.1:%s", port)
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "fetch_emails",
-		Description: "Fetch a list of email headers",
-	}, FetchEmailsTool)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", mcpHandler)
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "read_email",
-		Description: "Read the full content of an email by UID",
-	}, ReadEmailTool)
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("Failed to listen on %s: %v", address, err)
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "send_email",
-		Description: "Send an email",
-	}, SendEmailTool)
+	server := &http.Server{
+		Handler: mux,
+	}
 
-	log.Println("Starting MCP Email Server...")
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("Server error: %v", err)
+	jsonLog("INFO", fmt.Sprintf("MCP server starting on http://%s/mcp", address))
+	if err := server.Serve(listener); err != nil {
+		log.Fatalf("Server failed: %v", err)
 	}
 }
