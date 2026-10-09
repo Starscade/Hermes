@@ -163,6 +163,19 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 					criteria := &imap.SearchCriteria{}
 					if unreadOnly {
 						criteria.NotFlag = []imap.Flag{"\\Seen"}
+					} else {
+						// If not unreadOnly, we return the count and a note that all are available.
+						respText := fmt.Sprintf("Found %d emails (Total messages in box: %d)", mbox.NumMessages, mbox.NumMessages)
+						json.NewEncoder(w).Encode(JSONRPCResponse{
+							JSONRPC: "2.0",
+							ID:      req.ID,
+							Result: map[string]interface{}{
+								"content": []map[string]interface{}{
+									{"type": "text", "text": respText},
+								},
+							},
+						})
+						return
 					}
 
 					ids, searchErr := c.Search(criteria, nil).Wait()
