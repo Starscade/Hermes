@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,7 +150,6 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 			var c *imapclient.Client
 			var err error
 
-			// Retry once if connection was stale
 			for i := 0; i < 2; i++ {
 				c, err = getIMAPClient()
 				if err != nil {
@@ -160,45 +160,85 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 
 				mbox, selectErr := c.Select("INBOX", nil).Wait()
 				if selectErr == nil {
-					criteria := &imap.SearchCriteria{}
+					var seqSet imap.SeqSet
+
 					if unreadOnly {
-						criteria.NotFlag = []imap.Flag{"\\Seen"}
-					} else {
-						// If not unreadOnly, we return the count and a note that all are available.
-						respText := fmt.Sprintf("Found %d emails (Total messages in box: %d)", mbox.NumMessages, mbox.NumMessages)
-						json.NewEncoder(w).Encode(JSONRPCResponse{
-							JSONRPC: "2.0",
-							ID:      req.ID,
-							Result: map[string]interface{}{
-								"content": []map[string]interface{}{
-									{"type": "text", "text": respText},
+						criteria := &imap.SearchCriteria{
+							NotFlag: []imap.Flag{"\\Seen"},
+						}
+						ids, searchErr := c.Search(criteria, nil).Wait()
+						if searchErr != nil {
+							jsonLog("ERROR", fmt.Sprintf("list_emails search error: %v", searchErr))
+							json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": searchErr.Error()}})
+							return
+						}
+						if len(ids.AllUIDs()) == 0 {
+							json.NewEncoder(w).Encode(JSONRPCResponse{
+								JSONRPC: "2.0",
+								ID:      req.ID,
+								Result: map[string]interface{}{
+									"content": []map[string]interface{}{{"type": "text", "text": "No unread emails found."}},
 								},
-							},
-						})
-						return
+							})
+							return
+						}
+						uids := ids.AllUIDs()
+						seqSet = imap.SeqSet{}
+						for _, uid := range uids {
+							seqSet.AddNum(uint32(uid))
+						}
+					} else {
+						start := uint32(1)
+						if mbox.NumMessages > 20 {
+							start = mbox.NumMessages - 19
+						}
+						seqSet = imap.SeqSet{}
+						seqSet.AddRange(start, mbox.NumMessages)
 					}
 
-					ids, searchErr := c.Search(criteria, nil).Wait()
-					if searchErr != nil {
-						jsonLog("ERROR", fmt.Sprintf("list_emails search error: %v", searchErr))
-						json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": searchErr.Error()}})
-						return
+					options := &imap.FetchOptions{
+						Envelope: true,
 					}
 
-					respText := fmt.Sprintf("Found %d emails. Sequence IDs: %v (Total messages in box: %d)", len(ids.AllUIDs()), ids.AllUIDs(), mbox.NumMessages)
+					fetchCmd := c.Fetch(seqSet, options)
+					defer fetchCmd.Close()
+
+					var summary strings.Builder
+					summary.WriteString(fmt.Sprintf("Inbox Summary (Total: %d):\n", mbox.NumMessages))
+
+					count := 0
+					msg := fetchCmd.Next()
+					for msg != nil {
+						count++
+						item := msg.Next()
+						if envItem, ok := item.(imapclient.FetchItemDataEnvelope); ok {
+							env := envItem.Envelope
+							from := "Unknown"
+							if len(env.From) > 0 {
+								from = env.From[0].Addr()
+							}
+							summary.WriteString(fmt.Sprintf("[%d] From: %s | Date: %s | Subject: %s\n",
+								msg.SeqNum, from, env.Date.Format("2006-01-02 15:04"), env.Subject))
+						}
+						msg = fetchCmd.Next()
+					}
+
+					if count == 0 {
+						summary.WriteString("No emails found matching criteria.")
+					}
+
 					json.NewEncoder(w).Encode(JSONRPCResponse{
 						JSONRPC: "2.0",
 						ID:      req.ID,
 						Result: map[string]interface{}{
 							"content": []map[string]interface{}{
-								{"type": "text", "text": respText},
+								{"type": "text", "text": summary.String()},
 							},
 						},
 					})
 					return
 				}
 
-				// If select failed, clear the global client so next attempt reconnects
 				imapMutex.Lock()
 				imapClient = nil
 				imapMutex.Unlock()
@@ -318,7 +358,7 @@ func mcpHandler(w http.ResponseWriter, r *http.Request) {
 				"tools": []map[string]interface{}{
 					{
 						"name":        "list_emails",
-						"description": "Lists email status using imap library.",
+						"description": "Lists emails with summaries (Subject, Date, From).",
 						"inputSchema": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
@@ -379,10 +419,10 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	address := fmt.Sprintf("127.0.0.1:%s", port)
+	address := fmt.Sprintf(":%s", port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", mcpHandler)
+	mux.HandleFunc("/", mcpHandler)
 
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -393,7 +433,7 @@ func main() {
 		Handler: mux,
 	}
 
-	jsonLog("INFO", fmt.Sprintf("MCP server starting on http://%s/mcp", address))
+	jsonLog("INFO", fmt.Sprintf("MCP server starting on port %s", port))
 	if err := server.Serve(listener); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
