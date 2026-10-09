@@ -20,15 +20,15 @@ make dock
 
 The server requires the following environment variables to be set for authentication and connectivity:
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `IMAP_HOST` | IMAP server hostname | `imap.gmail.com` |
-| `IMAP_PORT` | IMAP server port | `993` |
-| `SMTP_HOST` | SMTP server hostname | `smtp.gmail.com` |
-| `SMTP_PORT` | SMTP server port | `465` |
-| `EMAIL_USER` | Email username/address | `user@example.com` |
-| `EMAIL_PASS` | Email password or App Password | `your-password` |
-| `HERMES_PORT`| Server port (defaults to 8080) | `8080` |
+| Variable | Description |
+|----------|-------------|
+| `IMAP_HOST` | IMAP server hostname |
+| `IMAP_PORT` | IMAP server port |
+| `SMTP_HOST` | SMTP server hostname |
+| `SMTP_PORT` | SMTP server port |
+| `EMAIL_USER` | Email username/address |
+| `EMAIL_PASS` | Email password or App Password |
+| `HERMES_PORT`| Server port (defaults to 8080) |
 
 ## MCP Tools
 
