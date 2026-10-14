@@ -301,7 +301,7 @@ func handleRequest(req JSONRPCRequest) JSONRPCResponse {
 
 			auth := smtp.PlainAuth("", user, pass, smtpHost)
 			addr := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
-			msg := []byte("From: " + user + "To: " + to + "\r\n" + "Subject: " + subject + "\r\n" + "\r\n" + body + "\r\n")
+			msg := []byte("From: " + user + "\r\nTo: " + to + "\r\nSubject: " + subject + "\r\n\r\n" + body + "\r\n")
 
 			if err := smtp.SendMail(addr, auth, user, []string{to}, msg); err != nil {
 				return JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: map[string]interface{}{"code": -32000, "message": err.Error()}}
