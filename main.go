@@ -194,7 +194,13 @@ func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, p
 
 	auth := smtp.PlainAuth("", user, pass, smtpHost)
 	addr := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
-	msg := []byte("From: " + user + "\r\nTo: " + params.To + "\r\nSubject: " + params.Subject + "\r\n\r\n" + params.Body + "\r\n")
+	msg := []byte("From: " + user +
+		"\r\nTo: " + params.To +
+		"\r\nSubject: " + params.Subject +
+		"\r\nMIME-version: 1.0;" +
+		"\r\nContent-Type: text/html; charset=\"UTF-8\"" +
+		"\r\n\r\n" +
+		params.Body + "\r\n")
 
 	if err := smtp.SendMail(addr, auth, user, []string{params.To}, msg); err != nil {
 		return nil, nil, err
