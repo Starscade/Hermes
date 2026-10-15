@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"os"
 	"strconv"
 	"strings"
@@ -66,10 +69,16 @@ type ReadEmailParams struct {
 	Seq string `json:"seq"`
 }
 
+type Attachment struct {
+	Filename string `json:"filename"`
+	Data     string `json:"data"` // Base64 encoded content
+}
+
 type SendEmailParams struct {
-	To      string `json:"to"`
-	Subject string `json:"subject"`
-	Body    string `json:"body"`
+	To          string       `json:"to"`
+	Subject     string       `json:"subject"`
+	Body        string       `json:"body"`
+	Attachments []Attachment `json:"attachments"`
 }
 
 func (s *EmailServer) getIMAPClient(ctx context.Context) (*imapclient.Client, error) {
@@ -306,12 +315,49 @@ func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, p
 	auth := smtp.PlainAuth("", s.cfg.EmailUser, s.cfg.EmailPass, s.cfg.SmtpHost)
 	addr := fmt.Sprintf("%s:%s", s.cfg.SmtpHost, s.cfg.SmtpPort)
 
-	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-version: %s\r\nContent-Type: %s\r\n\r\n%s\r\n",
-		s.cfg.EmailUser, params.To, params.Subject, MimeVersion, ContentTypeHTML, params.Body))
+	buf := bytes.NewBuffer(nil)
+
+	buf.WriteString(fmt.Sprintf("From: %s\r\n", s.cfg.EmailUser))
+	buf.WriteString(fmt.Sprintf("To: %s\r\n", params.To))
+	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", params.Subject))
+	buf.WriteString(fmt.Sprintf("MIME-Version: %s\r\n", MimeVersion))
+
+	if len(params.Attachments) == 0 {
+		buf.WriteString(fmt.Sprintf("Content-Type: %s\r\n\r\n", ContentTypeHTML))
+		buf.WriteString(params.Body)
+	} else {
+		writer := multipart.NewWriter(buf)
+		buf.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=%s\r\n\r\n", writer.Boundary()))
+
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Type", ContentTypeHTML)
+		bodyPart, err := writer.CreatePart(h)
+		if err != nil {
+			return nil, nil, err
+		}
+		bodyPart.Write([]byte(params.Body))
+
+		for _, att := range params.Attachments {
+			data, err := base64.StdEncoding.DecodeString(att.Data)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to decode attachment %s: %w", att.Filename, err)
+			}
+
+			attH := make(textproto.MIMEHeader)
+			attH.Set("Content-Type", "application/octet-stream")
+			attH.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, att.Filename))
+			attPart, err := writer.CreatePart(attH)
+			if err != nil {
+				return nil, nil, err
+			}
+			attPart.Write(data)
+		}
+		writer.Close()
+	}
 
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- smtp.SendMail(addr, auth, s.cfg.EmailUser, []string{params.To}, msg)
+		errChan <- smtp.SendMail(addr, auth, s.cfg.EmailUser, []string{params.To}, buf.Bytes())
 	}()
 
 	select {
@@ -324,7 +370,7 @@ func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, p
 	}
 
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Successfully sent email to %s", params.To)}},
+		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Successfully sent email to %s with %d attachments", params.To, len(params.Attachments))}},
 	}, nil, nil
 }
 
@@ -369,7 +415,7 @@ func main() {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "send_email",
-		Description: "Sends an email to a recipient.",
+		Description: "Sends an email to a recipient, optionally with base64 encoded attachments.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -384,6 +430,24 @@ func main() {
 				"body": map[string]any{
 					"type":        "string",
 					"description": "Email body content",
+				},
+				"attachments": map[string]any{
+					"type":        "array",
+					"description": "List of base64 encoded files to attach",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"filename": map[string]any{
+								"type":        "string",
+								"description": "Name of the file",
+							},
+							"data": map[string]any{
+								"type":        "string",
+								"description": "Base64 encoded content of the file",
+							},
+						},
+						"required": []string{"filename", "data"},
+					},
 				},
 			},
 			"required": []string{"to", "subject", "body"},
