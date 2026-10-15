@@ -19,6 +19,7 @@ import (
 var (
 	imapClient *imapclient.Client
 	imapMutex  sync.Mutex
+	Version    = "dev"
 )
 
 type EmailServer struct{}
@@ -215,8 +216,8 @@ func main() {
 	s := &EmailServer{}
 
 	srv := mcp.NewServer(&mcp.Implementation{
-		Name:    "email-mcp-server",
-		Version: "1.0.0",
+		Name:    "hermes",
+		Version: Version,
 	}, nil)
 
 	mcp.AddTool(srv, &mcp.Tool{

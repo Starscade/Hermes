@@ -1,9 +1,8 @@
 .POSIX:
 
 
-GIT_BRANCH = $(shell git branch --show-current)
-GIT_TAG = $(shell git describe --tags)
-LDFLAGS = -s -w -X 'main.version=$(GIT_TAG)-$(GIT_BRANCH)'
+GIT_TAG = $(shell git describe --tags --always)
+LDFLAGS = -s -w -X 'main.Version=$(GIT_TAG)'
 
 
 all:
