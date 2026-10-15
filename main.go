@@ -59,17 +59,17 @@ type EmailServer struct {
 
 // Tool Parameters
 type ListEmailsParams struct {
-	UnreadOnly bool `json:"unreadOnly" jsonschema:"If true, only returns unread emails."`
+	UnreadOnly bool `json:"unreadOnly"`
 }
 
 type ReadEmailParams struct {
-	Seq string `json:"seq" jsonschema:"The sequence number of the email."`
+	Seq string `json:"seq"`
 }
 
 type SendEmailParams struct {
-	To      string `json:"to" jsonschema:"Recipient email address"`
-	Subject string `json:"subject" jsonschema:"Email subject"`
-	Body    string `json:"body" jsonschema:"Email body content"`
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
 }
 
 func (s *EmailServer) getIMAPClient(ctx context.Context) (*imapclient.Client, error) {
@@ -89,8 +89,6 @@ func (s *EmailServer) getIMAPClient(ctx context.Context) (*imapclient.Client, er
 		return nil, fmt.Errorf("IMAP_HOST or IMAP_PORT not set")
 	}
 
-	// To implement a timeout for a blocking Dial call that doesn't support context,
-	// we run the dial in a goroutine and select on the context.
 	type dialResult struct {
 		client *imapclient.Client
 		err    error
@@ -343,16 +341,53 @@ func main() {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_emails",
 		Description: "Lists emails with summaries (Subject, Date, From).",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"unreadOnly": map[string]any{
+					"type":        "boolean",
+					"description": "If true, only returns unread emails.",
+				},
+			},
+		},
 	}, s.listEmails)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_email",
 		Description: "Reads the cleaned content of an email by sequence number.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"seq": map[string]any{
+					"type":        "string",
+					"description": "The sequence number of the email.",
+				},
+			},
+			"required": []string{"seq"},
+		},
 	}, s.readEmail)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "send_email",
 		Description: "Sends an email to a recipient.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"to": map[string]any{
+					"type":        "string",
+					"description": "Recipient email address",
+				},
+				"subject": map[string]any{
+					"type":        "string",
+					"description": "Email subject",
+				},
+				"body": map[string]any{
+					"type":        "string",
+					"description": "Email body content",
+				},
+			},
+			"required": []string{"to", "subject", "body"},
+		},
 	}, s.sendEmail)
 
 	if err := srv.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
