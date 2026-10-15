@@ -5,15 +5,26 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
+	"net/mail"
 	"net/smtp"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+const (
+	DefaultEmailLimit = 20
+	NetworkTimeout    = 30 * time.Second
+	MimeVersion       = "1.0"
+	ContentTypeHTML   = "text/html; charset=\"UTF-8\""
 )
 
 var (
@@ -22,7 +33,29 @@ var (
 	Version    = "dev"
 )
 
-type EmailServer struct{}
+type Config struct {
+	ImapHost  string
+	ImapPort  string
+	SmtpHost  string
+	SmtpPort  string
+	EmailUser string
+	EmailPass string
+}
+
+func LoadConfig() *Config {
+	return &Config{
+		ImapHost:  os.Getenv("IMAP_HOST"),
+		ImapPort:  os.Getenv("IMAP_PORT"),
+		SmtpHost:  os.Getenv("SMTP_HOST"),
+		SmtpPort:  os.Getenv("SMTP_PORT"),
+		EmailUser: os.Getenv("EMAIL_USER"),
+		EmailPass: os.Getenv("EMAIL_PASS"),
+	}
+}
+
+type EmailServer struct {
+	cfg *Config
+}
 
 // Tool Parameters
 type ListEmailsParams struct {
@@ -39,7 +72,7 @@ type SendEmailParams struct {
 	Body    string `json:"body" jsonschema:"Email body content"`
 }
 
-func getIMAPClient() (*imapclient.Client, error) {
+func (s *EmailServer) getIMAPClient(ctx context.Context) (*imapclient.Client, error) {
 	imapMutex.Lock()
 	defer imapMutex.Unlock()
 
@@ -52,31 +85,50 @@ func getIMAPClient() (*imapclient.Client, error) {
 		imapClient = nil
 	}
 
-	host := os.Getenv("IMAP_HOST")
-	port := os.Getenv("IMAP_PORT")
-	user := os.Getenv("EMAIL_USER")
-	pass := os.Getenv("EMAIL_PASS")
-
-	if host == "" || port == "" {
+	if s.cfg.ImapHost == "" || s.cfg.ImapPort == "" {
 		return nil, fmt.Errorf("IMAP_HOST or IMAP_PORT not set")
 	}
 
-	c, err := imapclient.DialTLS(fmt.Sprintf("%s:%s", host, port), nil)
-	if err != nil {
-		return nil, fmt.Errorf("dial tls failed: %w", err)
+	// To implement a timeout for a blocking Dial call that doesn't support context,
+	// we run the dial in a goroutine and select on the context.
+	type dialResult struct {
+		client *imapclient.Client
+		err    error
 	}
+	resChan := make(chan dialResult, 1)
 
-	if err := c.Login(user, pass).Wait(); err != nil {
-		c.Logout().Wait()
-		return nil, fmt.Errorf("login failed: %w", err)
+	go func() {
+		addr := fmt.Sprintf("%s:%s", s.cfg.ImapHost, s.cfg.ImapPort)
+		c, err := imapclient.DialTLS(addr, nil)
+		if err != nil {
+			resChan <- dialResult{nil, err}
+			return
+		}
+
+		if err := c.Login(s.cfg.EmailUser, s.cfg.EmailPass).Wait(); err != nil {
+			c.Logout().Wait()
+			resChan <- dialResult{nil, err}
+			return
+		}
+		resChan <- dialResult{c, nil}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(NetworkTimeout):
+		return nil, fmt.Errorf("IMAP connection timed out after %v", NetworkTimeout)
+	case res := <-resChan:
+		if res.err != nil {
+			return nil, res.err
+		}
+		imapClient = res.client
+		return imapClient, nil
 	}
-
-	imapClient = c
-	return imapClient, nil
 }
 
 func (s *EmailServer) listEmails(ctx context.Context, req *mcp.CallToolRequest, params ListEmailsParams) (*mcp.CallToolResult, any, error) {
-	c, err := getIMAPClient()
+	c, err := s.getIMAPClient(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -105,8 +157,8 @@ func (s *EmailServer) listEmails(ctx context.Context, req *mcp.CallToolRequest, 
 		}
 	} else {
 		start := uint32(1)
-		if mbox.NumMessages > 20 {
-			start = mbox.NumMessages - 19
+		if mbox.NumMessages > DefaultEmailLimit {
+			start = mbox.NumMessages - uint32(DefaultEmailLimit-1)
 		}
 		seqSet = imap.SeqSet{}
 		seqSet.AddRange(start, mbox.NumMessages)
@@ -151,7 +203,7 @@ func (s *EmailServer) readEmail(ctx context.Context, req *mcp.CallToolRequest, p
 		return nil, nil, fmt.Errorf("invalid sequence number: %w", err)
 	}
 
-	c, err := getIMAPClient()
+	c, err := s.getIMAPClient(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -167,44 +219,110 @@ func (s *EmailServer) readEmail(ctx context.Context, req *mcp.CallToolRequest, p
 	fetchCmd := c.Fetch(seqSet, options)
 	defer fetchCmd.Close()
 
-	var bodyBuilder strings.Builder
 	msg := fetchCmd.Next()
-	if msg != nil {
-		for {
-			item := msg.Next()
-			if item == nil {
-				break
-			}
-			if data, ok := item.(imapclient.FetchItemDataBodySection); ok {
-				b, _ := io.ReadAll(data.Literal)
-				bodyBuilder.Write(b)
-			}
+	if msg == nil {
+		return nil, nil, fmt.Errorf("email not found")
+	}
+
+	var rawBody []byte
+	for {
+		item := msg.Next()
+		if item == nil {
+			break
+		}
+		if data, ok := item.(imapclient.FetchItemDataBodySection); ok {
+			b, _ := io.ReadAll(data.Literal)
+			rawBody = append(rawBody, b...)
 		}
 	}
 
+	cleanText, err := parseEmailBody(rawBody)
+	if err != nil {
+		log.Printf("Error parsing email body: %v", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(rawBody)}},
+		}, nil, nil
+	}
+
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: bodyBuilder.String()}},
+		Content: []mcp.Content{&mcp.TextContent{Text: cleanText}},
 	}, nil, nil
 }
 
+func parseEmailBody(raw []byte) (string, error) {
+	msg, err := mail.ReadMessage(strings.NewReader(string(raw)))
+	if err != nil {
+		return "", err
+	}
+
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		body, _ := io.ReadAll(msg.Body)
+		return string(body), nil
+	}
+
+	if mediaType == "text/plain" {
+		body, _ := io.ReadAll(msg.Body)
+		return string(body), nil
+	}
+
+	if mediaType == "multipart/" {
+		mr := multipart.NewReader(msg.Body, params["boundary"])
+		var plainText strings.Builder
+		var htmlText strings.Builder
+
+		for {
+			p, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", err
+			}
+
+			pType, _, _ := mime.ParseMediaType(p.Header.Get("Content-Type"))
+			content, _ := io.ReadAll(p)
+
+			if pType == "text/plain" {
+				plainText.Write(content)
+			} else if pType == "text/html" {
+				htmlText.Write(content)
+			}
+		}
+
+		if plainText.Len() > 0 {
+			return plainText.String(), nil
+		}
+		return htmlText.String(), nil
+	}
+
+	body, _ := io.ReadAll(msg.Body)
+	return string(body), nil
+}
+
 func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, params SendEmailParams) (*mcp.CallToolResult, any, error) {
-	smtpHost := os.Getenv("SMTP_HOST")
-	smtpPort := os.Getenv("SMTP_PORT")
-	user := os.Getenv("EMAIL_USER")
-	pass := os.Getenv("EMAIL_PASS")
+	if _, err := mail.ParseAddress(params.To); err != nil {
+		return nil, nil, fmt.Errorf("invalid recipient email address: %w", err)
+	}
 
-	auth := smtp.PlainAuth("", user, pass, smtpHost)
-	addr := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
-	msg := []byte("From: " + user +
-		"\r\nTo: " + params.To +
-		"\r\nSubject: " + params.Subject +
-		"\r\nMIME-version: 1.0;" +
-		"\r\nContent-Type: text/html; charset=\"UTF-8\"" +
-		"\r\n\r\n" +
-		params.Body + "\r\n")
+	auth := smtp.PlainAuth("", s.cfg.EmailUser, s.cfg.EmailPass, s.cfg.SmtpHost)
+	addr := fmt.Sprintf("%s:%s", s.cfg.SmtpHost, s.cfg.SmtpPort)
 
-	if err := smtp.SendMail(addr, auth, user, []string{params.To}, msg); err != nil {
-		return nil, nil, err
+	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-version: %s\r\nContent-Type: %s\r\n\r\n%s\r\n",
+		s.cfg.EmailUser, params.To, params.Subject, MimeVersion, ContentTypeHTML, params.Body))
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- smtp.SendMail(addr, auth, s.cfg.EmailUser, []string{params.To}, msg)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case err := <-errChan:
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return &mcp.CallToolResult{
@@ -213,7 +331,9 @@ func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, p
 }
 
 func main() {
-	s := &EmailServer{}
+	s := &EmailServer{
+		cfg: LoadConfig(),
+	}
 
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "hermes",
@@ -227,7 +347,7 @@ func main() {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_email",
-		Description: "Reads raw email content by sequence number.",
+		Description: "Reads the cleaned content of an email by sequence number.",
 	}, s.readEmail)
 
 	mcp.AddTool(srv, &mcp.Tool{
