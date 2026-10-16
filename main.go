@@ -70,8 +70,8 @@ type ReadEmailParams struct {
 }
 
 type Attachment struct {
-	Filename string `json:"filename"`
-	Data     string `json:"data"` // Base64 encoded content
+	Path     string `json:"path"`
+	MimeType string `json:"mimeType"`
 }
 
 type SendEmailParams struct {
@@ -329,6 +329,7 @@ func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, p
 		writer := multipart.NewWriter(buf)
 		buf.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=%s\r\n\r\n", writer.Boundary()))
 
+		// Part 1: The Body
 		h := make(textproto.MIMEHeader)
 		h.Set("Content-Type", ContentTypeHTML)
 		bodyPart, err := writer.CreatePart(h)
@@ -337,20 +338,39 @@ func (s *EmailServer) sendEmail(ctx context.Context, req *mcp.CallToolRequest, p
 		}
 		bodyPart.Write([]byte(params.Body))
 
+		// Parts 2..N: The Attachments
 		for _, att := range params.Attachments {
-			data, err := base64.StdEncoding.DecodeString(att.Data)
+			data, err := os.ReadFile(att.Path)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed to decode attachment %s: %w", att.Filename, err)
+				return nil, nil, fmt.Errorf("failed to read attachment file at %s: %w", att.Path, err)
 			}
 
 			attH := make(textproto.MIMEHeader)
-			attH.Set("Content-Type", "application/octet-stream")
-			attH.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, att.Filename))
+			contentType := att.MimeType
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+			attH.Set("Content-Type", contentType)
+			// Explicitly set Base64 encoding to prevent binary corruption/metadata loss
+			attH.Set("Content-Transfer-Encoding", "base64")
+
+			fileName := att.Path
+			if idx := strings.LastIndex(att.Path, string(os.PathSeparator)); idx != -1 {
+				fileName = att.Path[idx+1:]
+			}
+			attH.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+
 			attPart, err := writer.CreatePart(attH)
 			if err != nil {
 				return nil, nil, err
 			}
-			attPart.Write(data)
+
+			// Encode the file content as Base64
+			encoder := base64.NewEncoder(base64.StdEncoding, attPart)
+			if _, err := encoder.Write(data); err != nil {
+				return nil, nil, err
+			}
+			encoder.Close()
 		}
 		writer.Close()
 	}
@@ -415,7 +435,7 @@ func main() {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "send_email",
-		Description: "Sends an email to a recipient, optionally with base64 encoded attachments.",
+		Description: "Sends an email to a recipient, optionally with local file attachments.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -433,20 +453,20 @@ func main() {
 				},
 				"attachments": map[string]any{
 					"type":        "array",
-					"description": "List of base64 encoded files to attach",
+					"description": "List of local files to attach",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"filename": map[string]any{
+							"path": map[string]any{
 								"type":        "string",
-								"description": "Name of the file",
+								"description": "The absolute path to the file on the local system",
 							},
-							"data": map[string]any{
+							"mimeType": map[string]any{
 								"type":        "string",
-								"description": "Base64 encoded content of the file",
+								"description": "The MIME type of the file (e.g., 'image/jpeg', 'application/pdf')",
 							},
 						},
-						"required": []string{"filename", "data"},
+						"required": []string{"path", "mimeType"},
 					},
 				},
 			},
